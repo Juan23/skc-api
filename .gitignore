@@ -1,0 +1,10 @@
+bin/
+obj/
+.vs/
+.vscode/
+*.user
+*.bak
+appsettings.Development.json
+appsettings.Local.json
+__MACOSX/
+.DS_Store

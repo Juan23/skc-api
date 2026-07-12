@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: central_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: central_admin
+      POSTGRES_PASSWORD: pleasedonthackmeimanewbie
+      POSTGRES_DB: skc_central
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      # Bind strictly to localhost/Tailscale so it's not exposed publicly
+      - "127.0.0.1:5432:5432"
+
+  api:
+    image: central-api:latest
+    container_name: central_api_service
+    restart: always
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      # Expose port 7290 strictly internally
+      - "7290:7290"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - ASPNETCORE_HTTP_PORTS=7290
+      - ConnectionStrings__DefaultConnection=Host=db;Database=skc_central;Username=central_admin;Password=pleasedonthackmeimanewbie
+    depends_on:
+      - db
+
+volumes:
+  pgdata:
