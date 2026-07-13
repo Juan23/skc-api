@@ -18,6 +18,16 @@ var app = builder.Build();
 // Endpoints
 app.MapGet("/health", () => Results.Ok(new { Status = "Healthy" }));
 
+app.MapGet("/api/inventory", async () =>
+{
+    using var db = new NpgsqlConnection(connectionString);
+    var products = await db.QueryAsync(@"
+        SELECT sku AS SKU, brand AS Brand, base_name AS BaseName, price AS Price 
+        FROM inventory 
+        WHERE is_active = true");
+    return Results.Ok(products);
+});
+
 app.MapPost("/api/sync/master", async (HttpContext context) =>
 {
     try
