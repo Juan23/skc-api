@@ -265,6 +265,103 @@ app.MapPatch("/api/inventory/{sku}/deactivate", async (string sku) =>
     return rows == 0 ? Results.NotFound() : Results.Ok();
 });
 
+// Reconciles the system's stock with a physical count. Used when a manual inventory
+// count (see the client's "print all inventory" count sheet) finds a discrepancy.
+app.MapPost("/api/inventory/{sku}/adjust", async (string sku, AdjustInventoryDto dto) =>
+{
+    using var db = new NpgsqlConnection(connectionString);
+    await db.OpenAsync();
+    using var transaction = await db.BeginTransactionAsync();
+
+    try
+    {
+        int currentTotal = await db.ExecuteScalarAsync<int>(
+            "SELECT COALESCE(SUM(remaining_qty), 0) FROM inventory_lots WHERE sku = @sku", new { sku }, transaction);
+        int delta = dto.NewCount - currentTotal;
+
+        if (delta == 0)
+        {
+            await transaction.CommitAsync();
+            return Results.Ok(new { Message = "No discrepancy." });
+        }
+
+        decimal costUsed;
+
+        if (delta > 0)
+        {
+            // Found more stock than the system expected. Cost the new lot at whatever the
+            // caller specified; otherwise fall back to the SKU's most recent purchase cost
+            // (or 0 if it's never been purchased) so the stock isn't recorded as worthless.
+            costUsed = dto.UnitCost ?? await db.ExecuteScalarAsync<decimal?>(
+                "SELECT unit_cost FROM inventory_lots WHERE sku = @sku ORDER BY date_received DESC, lot_id DESC LIMIT 1",
+                new { sku }, transaction) ?? 0m;
+
+            int nextLotId = await db.ExecuteScalarAsync<int>(
+                "SELECT COALESCE(MAX(lot_id), 0) FROM inventory_lots WHERE branch_name = 'Office'", transaction) + 1;
+
+            await db.ExecuteAsync(@"
+                INSERT INTO inventory_lots (branch_name, lot_id, sku, date_received, original_qty, remaining_qty, unit_cost)
+                VALUES ('Office', @LotId, @sku, CURRENT_TIMESTAMP, @Qty, @Qty, @UnitCost)",
+                new { LotId = nextLotId, sku, Qty = delta, UnitCost = costUsed }, transaction);
+        }
+        else
+        {
+            // Shrinkage/damage/miscount: remove stock the same FIFO way a delivery would
+            // (oldest lot first, tie-broken by lot_id - see POST /api/deliveries), so the
+            // loss is attributed to the oldest-costed stock rather than an arbitrary lot.
+            int qtyToRemove = -delta;
+            var lots = await db.QueryAsync<LotRow>(@"
+                SELECT lot_id AS LotId, remaining_qty AS RemainingQty, unit_cost AS UnitCost
+                FROM inventory_lots
+                WHERE sku = @sku AND remaining_qty > 0
+                ORDER BY date_received ASC, lot_id ASC", new { sku }, transaction);
+
+            decimal totalCostRemoved = 0;
+            foreach (var lot in lots)
+            {
+                if (qtyToRemove <= 0) break;
+
+                int qtyFromThisLot = Math.Min(qtyToRemove, lot.RemainingQty);
+                qtyToRemove -= qtyFromThisLot;
+                totalCostRemoved += qtyFromThisLot * lot.UnitCost;
+
+                await db.ExecuteAsync(
+                    "UPDATE inventory_lots SET remaining_qty = remaining_qty - @Take WHERE lot_id = @LotId",
+                    new { Take = qtyFromThisLot, LotId = lot.LotId }, transaction);
+            }
+
+            // qtyToRemove > 0 here would mean the count claims less stock exists than what we
+            // just summed as currentTotal, which is a contradiction - can't actually happen.
+            costUsed = totalCostRemoved / -delta;
+        }
+
+        await db.ExecuteAsync(@"
+            INSERT INTO inventory_adjustments (branch_name, sku, date, qty_delta, unit_cost, reason)
+            VALUES ('Office', @sku, CURRENT_TIMESTAMP, @Delta, @CostUsed, @Reason)",
+            new { sku, Delta = delta, CostUsed = costUsed, dto.Reason }, transaction);
+
+        await transaction.CommitAsync();
+        return Results.Ok();
+    }
+    catch (Exception ex)
+    {
+        await transaction.RollbackAsync();
+        return Results.Problem(ex.Message);
+    }
+});
+
+app.MapGet("/api/inventory/adjustments", async (DateTime start, DateTime end) =>
+{
+    using var db = new NpgsqlConnection(connectionString);
+    var sql = @"
+        SELECT a.date AS Date, a.sku AS SKU, i.brand AS Brand, i.base_name AS BaseName,
+               a.qty_delta AS QtyDelta, a.unit_cost AS UnitCost, a.reason AS Reason
+        FROM inventory_adjustments a LEFT JOIN inventory i ON a.sku = i.sku
+        WHERE a.date >= @start AND a.date <= @end
+        ORDER BY a.date DESC";
+    return Results.Ok(await db.QueryAsync<InventoryAdjustmentRow>(sql, new { start, end }));
+});
+
 app.Run();
 
 // DTO Schemas matching the SQLite structures
@@ -300,6 +397,24 @@ public class UpdateProductDto
 {
     public string Brand { get; set; } = string.Empty;
     public string BaseName { get; set; } = string.Empty;
+}
+
+public class AdjustInventoryDto
+{
+    public int NewCount { get; set; }
+    public decimal? UnitCost { get; set; }
+    public string Reason { get; set; } = string.Empty;
+}
+
+public class InventoryAdjustmentRow
+{
+    public DateTime Date { get; set; }
+    public string SKU { get; set; } = string.Empty;
+    public string Brand { get; set; } = string.Empty;
+    public string BaseName { get; set; } = string.Empty;
+    public int QtyDelta { get; set; }
+    public decimal UnitCost { get; set; }
+    public string Reason { get; set; } = string.Empty;
 }
 
 public class DeliveryLogDto
