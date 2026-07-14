@@ -64,10 +64,10 @@ app.MapPost("/api/deliveries", async (List<DeliveryLogDto> deliveries) =>
     try
     {
         int nextDeliveryId = await db.ExecuteScalarAsync<int>("SELECT COALESCE(MAX(local_id), 0) FROM delivery_logs WHERE branch_name = 'Office'", transaction);
+        var insertedRows = new List<DeliveryLog>();
 
         foreach (var d in deliveries)
         {
-            nextDeliveryId++;
             int qtyNeeded = d.Qty;
 
             // Strongly-typed query: Postgres folds unquoted "AS LotId"/"AS RemainingQty" aliases to
@@ -75,7 +75,7 @@ app.MapPost("/api/deliveries", async (List<DeliveryLogDto> deliveries) =>
             // returned null for lot.LotId/lot.RemainingQty (case-sensitive dynamic member lookup),
             // which crashed the (int) cast below. QueryAsync<LotRow> maps columns case-insensitively.
             var lots = await db.QueryAsync<LotRow>(@"
-                SELECT lot_id AS LotId, remaining_qty AS RemainingQty
+                SELECT lot_id AS LotId, remaining_qty AS RemainingQty, unit_cost AS UnitCost
                 FROM inventory_lots
                 WHERE sku = @SKU AND remaining_qty > 0
                 ORDER BY date_received ASC", new { d.SKU }, transaction);
@@ -86,24 +86,38 @@ app.MapPost("/api/deliveries", async (List<DeliveryLogDto> deliveries) =>
 
                 int qtyToTake = Math.Min(qtyNeeded, lot.RemainingQty);
                 qtyNeeded -= qtyToTake;
+                decimal chunkCost = qtyToTake * lot.UnitCost;
 
                 await db.ExecuteAsync(@"
-                    UPDATE inventory_lots 
-                    SET remaining_qty = remaining_qty - @Take 
+                    UPDATE inventory_lots
+                    SET remaining_qty = remaining_qty - @Take
                     WHERE lot_id = @LotId",
                     new { Take = qtyToTake, LotId = lot.LotId }, transaction);
+
+                nextDeliveryId++;
+                await db.ExecuteAsync(@"
+                    INSERT INTO delivery_logs (branch_name, local_id, transaction_id, date, sku, qty, to_branch, total_line_cost, requester, reason)
+                    VALUES ('Office', @LocalId, @TransactionId, CAST(@Date AS TIMESTAMP), @SKU, @Qty, @ToBranch, @TotalLineCost, @Requester, @Reason)",
+                    new { LocalId = nextDeliveryId, d.TransactionId, d.Date, d.SKU, Qty = qtyToTake, d.ToBranch, TotalLineCost = chunkCost, d.Requester, d.Reason }, transaction);
+
+                insertedRows.Add(new DeliveryLog
+                {
+                    TransactionId = d.TransactionId,
+                    Date = DateTime.Parse(d.Date),
+                    SKU = d.SKU,
+                    Qty = qtyToTake,
+                    ToBranch = d.ToBranch,
+                    TotalLineCost = chunkCost,
+                    Requester = d.Requester,
+                    Reason = d.Reason
+                });
             }
 
             if (qtyNeeded > 0)
                 throw new Exception($"Insufficient inventory for SKU: {d.SKU}. Short by {qtyNeeded}.");
-
-            await db.ExecuteAsync(@"
-                INSERT INTO delivery_logs (branch_name, local_id, transaction_id, date, sku, qty, to_branch, total_line_cost, requester, reason)
-                VALUES ('Office', @LocalId, @TransactionId, CAST(@Date AS TIMESTAMP), @SKU, @Qty, @ToBranch, @TotalLineCost, @Requester, @Reason)",
-                new { LocalId = nextDeliveryId, d.TransactionId, d.Date, d.SKU, d.Qty, d.ToBranch, d.TotalLineCost, d.Requester, d.Reason }, transaction);
         }
         await transaction.CommitAsync();
-        return Results.Ok();
+        return Results.Ok(insertedRows);
     }
     catch (Exception ex)
     {
@@ -231,6 +245,23 @@ app.MapPost("/api/inventory", async (InventoryItemDto product) =>
     }
 });
 
+app.MapPut("/api/inventory/{sku}", async (string sku, UpdateProductDto dto) =>
+{
+    using var db = new NpgsqlConnection(connectionString);
+    int rows = await db.ExecuteAsync(
+        "UPDATE inventory SET brand = @Brand, base_name = @BaseName, last_updated = CURRENT_TIMESTAMP WHERE sku = @sku",
+        new { dto.Brand, dto.BaseName, sku });
+    return rows == 0 ? Results.NotFound() : Results.Ok();
+});
+
+app.MapPatch("/api/inventory/{sku}/deactivate", async (string sku) =>
+{
+    using var db = new NpgsqlConnection(connectionString);
+    int rows = await db.ExecuteAsync(
+        "UPDATE inventory SET is_active = false, last_updated = CURRENT_TIMESTAMP WHERE sku = @sku", new { sku });
+    return rows == 0 ? Results.NotFound() : Results.Ok();
+});
+
 app.Run();
 
 // DTO Schemas matching the SQLite structures
@@ -259,6 +290,13 @@ public class LotRow
 {
     public int LotId { get; set; }
     public int RemainingQty { get; set; }
+    public decimal UnitCost { get; set; }
+}
+
+public class UpdateProductDto
+{
+    public string Brand { get; set; } = string.Empty;
+    public string BaseName { get; set; } = string.Empty;
 }
 
 public class DeliveryLogDto
