@@ -70,9 +70,12 @@ app.MapPost("/api/deliveries", async (List<DeliveryLogDto> deliveries) =>
             nextDeliveryId++;
             int qtyNeeded = d.Qty;
 
-            // Use COALESCE to force 0 if values are NULL
-            var lots = await db.QueryAsync(@"
-                SELECT COALESCE(lot_id, 0) AS LotId, COALESCE(remaining_qty, 0) AS RemainingQty
+            // Strongly-typed query: Postgres folds unquoted "AS LotId"/"AS RemainingQty" aliases to
+            // lowercase, so the dynamic (non-generic) QueryAsync overload used previously silently
+            // returned null for lot.LotId/lot.RemainingQty (case-sensitive dynamic member lookup),
+            // which crashed the (int) cast below. QueryAsync<LotRow> maps columns case-insensitively.
+            var lots = await db.QueryAsync<LotRow>(@"
+                SELECT lot_id AS LotId, remaining_qty AS RemainingQty
                 FROM inventory_lots
                 WHERE sku = @SKU AND remaining_qty > 0
                 ORDER BY date_received ASC", new { d.SKU }, transaction);
@@ -81,7 +84,7 @@ app.MapPost("/api/deliveries", async (List<DeliveryLogDto> deliveries) =>
             {
                 if (qtyNeeded <= 0) break;
 
-                int qtyToTake = Math.Min(qtyNeeded, (int)lot.RemainingQty);
+                int qtyToTake = Math.Min(qtyNeeded, lot.RemainingQty);
                 qtyNeeded -= qtyToTake;
 
                 await db.ExecuteAsync(@"
@@ -250,6 +253,12 @@ public class PurchaseLogDto
     public int Qty { get; set; }
     public decimal UnitCost { get; set; }
     public string Supplier { get; set; } = string.Empty;
+}
+
+public class LotRow
+{
+    public int LotId { get; set; }
+    public int RemainingQty { get; set; }
 }
 
 public class DeliveryLogDto
