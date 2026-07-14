@@ -74,11 +74,14 @@ app.MapPost("/api/deliveries", async (List<DeliveryLogDto> deliveries) =>
             // lowercase, so the dynamic (non-generic) QueryAsync overload used previously silently
             // returned null for lot.LotId/lot.RemainingQty (case-sensitive dynamic member lookup),
             // which crashed the (int) cast below. QueryAsync<LotRow> maps columns case-insensitively.
+            // date_received only carries a date (no time), so purchases entered on the same day
+            // tie on the first sort key; lot_id (assigned in purchase order) breaks the tie so FIFO
+            // stays deterministic instead of depending on Postgres's arbitrary tie-break order.
             var lots = await db.QueryAsync<LotRow>(@"
                 SELECT lot_id AS LotId, remaining_qty AS RemainingQty, unit_cost AS UnitCost
                 FROM inventory_lots
                 WHERE sku = @SKU AND remaining_qty > 0
-                ORDER BY date_received ASC", new { d.SKU }, transaction);
+                ORDER BY date_received ASC, lot_id ASC", new { d.SKU }, transaction);
 
             foreach (var lot in lots)
             {
