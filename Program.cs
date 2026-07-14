@@ -195,9 +195,14 @@ app.MapGet("/api/inventory", async () =>
 {
     using var db = new NpgsqlConnection(connectionString);
     var products = await db.QueryAsync(@"
-        SELECT sku AS SKU, brand AS Brand, base_name AS BaseName, price AS Price 
-        FROM inventory 
-        WHERE is_active = true");
+        SELECT 
+            i.sku AS SKU, 
+            i.brand AS Brand, 
+            i.base_name AS BaseName, 
+            i.price AS Price,
+            COALESCE((SELECT SUM(remaining_qty) FROM inventory_lots l WHERE l.sku = i.sku), 0) AS CurrentStock
+        FROM inventory i 
+        WHERE i.is_active = true");
     return Results.Ok(products);
 });
 
