@@ -55,7 +55,6 @@ app.MapPost("/api/purchases", async (List<PurchaseLogDto> purchases) =>
         return Results.Problem(ex.Message);
     }
 });
-
 app.MapPost("/api/deliveries", async (List<DeliveryLogDto> deliveries) =>
 {
     using var db = new NpgsqlConnection(connectionString);
@@ -73,9 +72,9 @@ app.MapPost("/api/deliveries", async (List<DeliveryLogDto> deliveries) =>
 
             // Use COALESCE to force 0 if values are NULL
             var lots = await db.QueryAsync(@"
-                SELECT COALESCE(lot_id, 0) AS LotId, COALESCE(remaining_qty, 0) AS RemainingQty 
-                FROM inventory_lots 
-                WHERE sku = @SKU AND remaining_qty > 0 
+                SELECT COALESCE(lot_id, 0) AS LotId, COALESCE(remaining_qty, 0) AS RemainingQty
+                FROM inventory_lots
+                WHERE sku = @SKU AND remaining_qty > 0
                 ORDER BY date_received ASC", new { d.SKU }, transaction);
 
             foreach (var lot in lots)
@@ -109,59 +108,6 @@ app.MapPost("/api/deliveries", async (List<DeliveryLogDto> deliveries) =>
         return Results.Problem(ex.Message);
     }
 });
-
-//app.MapPost("/api/deliveries", async (List<DeliveryLogDto> deliveries) =>
-//{
-//    using var db = new NpgsqlConnection(connectionString);
-//    await db.OpenAsync();
-//    using var transaction = await db.BeginTransactionAsync();
-
-//    try
-//    {
-//        int nextDeliveryId = await db.ExecuteScalarAsync<int>("SELECT COALESCE(MAX(local_id), 0) FROM delivery_logs WHERE branch_name = 'Office'", transaction);
-
-//        foreach (var d in deliveries)
-//        {
-//            nextDeliveryId++;
-//            int qtyNeeded = d.Qty;
-
-//            var lots = await db.QueryAsync(@"
-//                SELECT lot_id AS LotId, remaining_qty AS RemainingQty 
-//                FROM inventory_lots 
-//                WHERE sku = @SKU AND remaining_qty > 0 
-//                ORDER BY date_received ASC", new { d.SKU }, transaction);
-
-//            foreach (var lot in lots)
-//            {
-//                if (qtyNeeded <= 0) break;
-
-//                int qtyToTake = Math.Min(qtyNeeded, (int)lot.RemainingQty);
-//                qtyNeeded -= qtyToTake;
-
-//                await db.ExecuteAsync(@"
-//                    UPDATE inventory_lots 
-//                    SET remaining_qty = remaining_qty - @Take 
-//                    WHERE lot_id = @LotId",
-//                    new { Take = qtyToTake, LotId = lot.LotId }, transaction);
-//            }
-
-//            if (qtyNeeded > 0)
-//                throw new Exception($"Insufficient inventory for SKU: {d.SKU}. Short by {qtyNeeded}.");
-
-//            await db.ExecuteAsync(@"
-//                INSERT INTO delivery_logs (branch_name, local_id, transaction_id, date, sku, qty, to_branch, total_line_cost, requester, reason)
-//                VALUES ('Office', @LocalId, @TransactionId, CAST(@Date AS TIMESTAMP), @SKU, @Qty, @ToBranch, @TotalLineCost, @Requester, @Reason)",
-//                new { LocalId = nextDeliveryId, d.TransactionId, d.Date, d.SKU, d.Qty, d.ToBranch, d.TotalLineCost, d.Requester, d.Reason }, transaction);
-//        }
-//        await transaction.CommitAsync();
-//        return Results.Ok();
-//    }
-//    catch (Exception ex)
-//    {
-//        await transaction.RollbackAsync();
-//        return Results.Problem(ex.Message);
-//    }
-//});
 
 // --- HISTORY & VIEW ENDPOINTS ---
 app.MapGet("/api/purchases/tickets", async (DateTime start, DateTime end) => {
@@ -219,14 +165,16 @@ app.MapDelete("/api/deliveries/{id}", async (string id) => {
     try
     {
         var lines = await db.QueryAsync("SELECT sku, qty, total_line_cost FROM delivery_logs WHERE transaction_id = @id", new { id }, tx);
+        int nextLotId = await db.ExecuteScalarAsync<int>("SELECT COALESCE(MAX(lot_id), 0) FROM inventory_lots WHERE branch_name = 'Office'", tx);
         foreach (var item in lines)
         {
             if (item.qty > 0)
             {
+                nextLotId++;
                 decimal unitCost = item.total_line_cost / item.qty;
-                await db.ExecuteAsync(@"INSERT INTO inventory_lots (sku, date_received, original_qty, remaining_qty, unit_cost) 
-                                        VALUES (@sku, CURRENT_TIMESTAMP, @qty, @qty, @cost)",
-                                        new { sku = item.sku, qty = item.qty, cost = unitCost }, tx);
+                await db.ExecuteAsync(@"INSERT INTO inventory_lots (branch_name, lot_id, sku, date_received, original_qty, remaining_qty, unit_cost)
+                                        VALUES ('Office', @LotId, @sku, CURRENT_TIMESTAMP, @qty, @qty, @cost)",
+                                        new { LotId = nextLotId, sku = item.sku, qty = item.qty, cost = unitCost }, tx);
             }
         }
         await db.ExecuteAsync("DELETE FROM delivery_logs WHERE transaction_id = @id", new { id }, tx);
