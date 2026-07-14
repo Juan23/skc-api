@@ -206,6 +206,26 @@ app.MapGet("/api/inventory", async () =>
     return Results.Ok(products);
 });
 
+app.MapPost("/api/inventory", async (InventoryItemDto product) =>
+{
+    using var db = new NpgsqlConnection(connectionString);
+    try
+    {
+        await db.ExecuteAsync(@"
+            INSERT INTO inventory (sku, brand, base_name, price, is_active) 
+            VALUES (@SKU, @Brand, @BaseName, @Price, @IsActive)", product);
+        return Results.Ok();
+    }
+    catch (PostgresException ex) when (ex.SqlState == "23505") // 23505 is PostgreSQL's Unique Violation code
+    {
+        return Results.Conflict("Duplicate SKU");
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem(ex.Message);
+    }
+});
+
 app.Run();
 
 // DTO Schemas matching the SQLite structures
