@@ -71,8 +71,9 @@ app.MapPost("/api/deliveries", async (List<DeliveryLogDto> deliveries) =>
             nextDeliveryId++;
             int qtyNeeded = d.Qty;
 
+            // Use COALESCE to force 0 if values are NULL
             var lots = await db.QueryAsync(@"
-                SELECT lot_id AS LotId, remaining_qty AS RemainingQty 
+                SELECT COALESCE(lot_id, 0) AS LotId, COALESCE(remaining_qty, 0) AS RemainingQty 
                 FROM inventory_lots 
                 WHERE sku = @SKU AND remaining_qty > 0 
                 ORDER BY date_received ASC", new { d.SKU }, transaction);
@@ -108,6 +109,59 @@ app.MapPost("/api/deliveries", async (List<DeliveryLogDto> deliveries) =>
         return Results.Problem(ex.Message);
     }
 });
+
+//app.MapPost("/api/deliveries", async (List<DeliveryLogDto> deliveries) =>
+//{
+//    using var db = new NpgsqlConnection(connectionString);
+//    await db.OpenAsync();
+//    using var transaction = await db.BeginTransactionAsync();
+
+//    try
+//    {
+//        int nextDeliveryId = await db.ExecuteScalarAsync<int>("SELECT COALESCE(MAX(local_id), 0) FROM delivery_logs WHERE branch_name = 'Office'", transaction);
+
+//        foreach (var d in deliveries)
+//        {
+//            nextDeliveryId++;
+//            int qtyNeeded = d.Qty;
+
+//            var lots = await db.QueryAsync(@"
+//                SELECT lot_id AS LotId, remaining_qty AS RemainingQty 
+//                FROM inventory_lots 
+//                WHERE sku = @SKU AND remaining_qty > 0 
+//                ORDER BY date_received ASC", new { d.SKU }, transaction);
+
+//            foreach (var lot in lots)
+//            {
+//                if (qtyNeeded <= 0) break;
+
+//                int qtyToTake = Math.Min(qtyNeeded, (int)lot.RemainingQty);
+//                qtyNeeded -= qtyToTake;
+
+//                await db.ExecuteAsync(@"
+//                    UPDATE inventory_lots 
+//                    SET remaining_qty = remaining_qty - @Take 
+//                    WHERE lot_id = @LotId",
+//                    new { Take = qtyToTake, LotId = lot.LotId }, transaction);
+//            }
+
+//            if (qtyNeeded > 0)
+//                throw new Exception($"Insufficient inventory for SKU: {d.SKU}. Short by {qtyNeeded}.");
+
+//            await db.ExecuteAsync(@"
+//                INSERT INTO delivery_logs (branch_name, local_id, transaction_id, date, sku, qty, to_branch, total_line_cost, requester, reason)
+//                VALUES ('Office', @LocalId, @TransactionId, CAST(@Date AS TIMESTAMP), @SKU, @Qty, @ToBranch, @TotalLineCost, @Requester, @Reason)",
+//                new { LocalId = nextDeliveryId, d.TransactionId, d.Date, d.SKU, d.Qty, d.ToBranch, d.TotalLineCost, d.Requester, d.Reason }, transaction);
+//        }
+//        await transaction.CommitAsync();
+//        return Results.Ok();
+//    }
+//    catch (Exception ex)
+//    {
+//        await transaction.RollbackAsync();
+//        return Results.Problem(ex.Message);
+//    }
+//});
 
 // --- HISTORY & VIEW ENDPOINTS ---
 app.MapGet("/api/purchases/tickets", async (DateTime start, DateTime end) => {
