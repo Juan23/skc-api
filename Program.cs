@@ -26,18 +26,25 @@ app.MapPost("/api/purchases", async (List<PurchaseLogDto> purchases) =>
 
     try
     {
+        // 1. Grab the highest existing IDs to simulate auto-increment
+        int nextPurchaseId = await db.ExecuteScalarAsync<int>("SELECT COALESCE(MAX(local_id), 0) FROM purchase_logs WHERE branch_name = 'Office'", transaction);
+        int nextLotId = await db.ExecuteScalarAsync<int>("SELECT COALESCE(MAX(local_lot_id), 0) FROM inventory_lots WHERE branch_name = 'Office'", transaction);
+
         foreach (var p in purchases)
         {
-            // 1. Record the purchase (Inject 'Office' to bypass the old DB constraint)
-            await db.ExecuteAsync(@"
-                INSERT INTO purchase_logs (branch_name, transaction_id, date, sku, qty, unit_cost, supplier)
-                VALUES ('Office', @TransactionId, @Date, @SKU, @Qty, @UnitCost, @Supplier)", p, transaction);
+            nextPurchaseId++;
+            nextLotId++;
 
-            // 2. Create a new inventory lot for FIFO tracking (Inject 'Office' here too)
+            // 2. Insert with the generated Local IDs
             await db.ExecuteAsync(@"
-                INSERT INTO inventory_lots (branch_name, sku, date_received, original_qty, remaining_qty, unit_cost)
-                VALUES ('Office', @SKU, @Date, @Qty, @Qty, @UnitCost)",
-                new { p.SKU, p.Date, p.Qty, p.UnitCost }, transaction);
+                INSERT INTO purchase_logs (branch_name, local_id, transaction_id, date, sku, qty, unit_cost, supplier)
+                VALUES ('Office', @LocalId, @TransactionId, @Date, @SKU, @Qty, @UnitCost, @Supplier)",
+                new { LocalId = nextPurchaseId, p.TransactionId, p.Date, p.SKU, p.Qty, p.UnitCost, p.Supplier }, transaction);
+
+            await db.ExecuteAsync(@"
+                INSERT INTO inventory_lots (branch_name, local_lot_id, sku, date_received, original_qty, remaining_qty, unit_cost)
+                VALUES ('Office', @LotId, @SKU, @Date, @Qty, @Qty, @UnitCost)",
+                new { LotId = nextLotId, p.SKU, p.Date, p.Qty, p.UnitCost }, transaction);
         }
         await transaction.CommitAsync();
         return Results.Ok();
@@ -57,11 +64,13 @@ app.MapPost("/api/deliveries", async (List<DeliveryLogDto> deliveries) =>
 
     try
     {
+        int nextDeliveryId = await db.ExecuteScalarAsync<int>("SELECT COALESCE(MAX(local_id), 0) FROM delivery_logs WHERE branch_name = 'Office'", transaction);
+
         foreach (var d in deliveries)
         {
+            nextDeliveryId++;
             int qtyNeeded = d.Qty;
 
-            // FIFO Logic: Fetch oldest available lots first
             var lots = await db.QueryAsync(@"
                 SELECT lot_id AS LotId, remaining_qty AS RemainingQty 
                 FROM inventory_lots 
@@ -85,11 +94,10 @@ app.MapPost("/api/deliveries", async (List<DeliveryLogDto> deliveries) =>
             if (qtyNeeded > 0)
                 throw new Exception($"Insufficient inventory for SKU: {d.SKU}. Short by {qtyNeeded}.");
 
-            // Record the delivery
             await db.ExecuteAsync(@"
-                INSERT INTO delivery_logs (transaction_id, date, sku, qty, to_branch, total_line_cost, requester, reason)
-                VALUES (@TransactionId, CAST(@Date AS TIMESTAMP), @SKU, @Qty, @ToBranch, @TotalLineCost, @Requester, @Reason)",
-                d, transaction);
+                INSERT INTO delivery_logs (branch_name, local_id, transaction_id, date, sku, qty, to_branch, total_line_cost, requester, reason)
+                VALUES ('Office', @LocalId, @TransactionId, CAST(@Date AS TIMESTAMP), @SKU, @Qty, @ToBranch, @TotalLineCost, @Requester, @Reason)",
+                new { LocalId = nextDeliveryId, d.TransactionId, d.Date, d.SKU, d.Qty, d.ToBranch, d.TotalLineCost, d.Requester, d.Reason }, transaction);
         }
         await transaction.CommitAsync();
         return Results.Ok();
