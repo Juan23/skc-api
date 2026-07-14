@@ -28,7 +28,7 @@ app.MapPost("/api/purchases", async (List<PurchaseLogDto> purchases) =>
     {
         // 1. Grab the highest existing IDs to simulate auto-increment
         int nextPurchaseId = await db.ExecuteScalarAsync<int>("SELECT COALESCE(MAX(local_id), 0) FROM purchase_logs WHERE branch_name = 'Office'", transaction);
-        int nextLotId = await db.ExecuteScalarAsync<int>("SELECT COALESCE(MAX(local_lot_id), 0) FROM inventory_lots WHERE branch_name = 'Office'", transaction);
+        int nextLotId = await db.ExecuteScalarAsync<int>("SELECT COALESCE(MAX(lot_id), 0) FROM inventory_lots WHERE branch_name = 'Office'", transaction);
 
         foreach (var p in purchases)
         {
@@ -42,7 +42,7 @@ app.MapPost("/api/purchases", async (List<PurchaseLogDto> purchases) =>
                 new { LocalId = nextPurchaseId, p.TransactionId, p.Date, p.SKU, p.Qty, p.UnitCost, p.Supplier }, transaction);
 
             await db.ExecuteAsync(@"
-                INSERT INTO inventory_lots (branch_name, local_lot_id, sku, date_received, original_qty, remaining_qty, unit_cost)
+                INSERT INTO inventory_lots (branch_name, lot_id, sku, date_received, original_qty, remaining_qty, unit_cost)
                 VALUES ('Office', @LotId, @SKU, @Date, @Qty, @Qty, @UnitCost)",
                 new { LotId = nextLotId, p.SKU, p.Date, p.Qty, p.UnitCost }, transaction);
         }
