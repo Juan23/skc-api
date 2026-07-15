@@ -64,18 +64,33 @@ CREATE INDEX IF NOT EXISTS idx_deliveries_sku ON delivery_logs(sku);
 CREATE TABLE IF NOT EXISTS inventory_lots (
     id SERIAL PRIMARY KEY,
     branch_name VARCHAR(100) NOT NULL,
-    local_lot_id INTEGER NOT NULL,               -- The LotId from the local SQLite db
+    lot_id INTEGER NOT NULL,                     -- The LotId from the local SQLite db
     sku VARCHAR(100) REFERENCES inventory(sku) ON UPDATE CASCADE,
     date_received TIMESTAMP WITHOUT TIME ZONE NOT NULL,
     original_qty INTEGER NOT NULL,
     remaining_qty INTEGER NOT NULL,
     unit_cost NUMERIC(18, 4) NOT NULL,
+    purchase_transaction_id VARCHAR(100),        -- Links back to purchase_logs.transaction_id when the lot came from a purchase; NULL for adjustment-created lots
     created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    
+
     -- Prevents duplicating lot tracking entries
-    CONSTRAINT uq_branch_inventory_lot UNIQUE (branch_name, local_lot_id)
+    CONSTRAINT uq_branch_inventory_lot UNIQUE (branch_name, lot_id),
+    CONSTRAINT chk_remaining_qty_non_negative CHECK (remaining_qty >= 0)
 );
 
 CREATE INDEX IF NOT EXISTS idx_lots_branch_sku ON inventory_lots(branch_name, sku);
-```
-eof
+CREATE INDEX IF NOT EXISTS idx_lots_purchase_txn ON inventory_lots(purchase_transaction_id);
+
+-- 5. Create Inventory Adjustments Table (manual stock count reconciliation log)
+CREATE TABLE IF NOT EXISTS inventory_adjustments (
+    id SERIAL PRIMARY KEY,
+    branch_name VARCHAR(100) NOT NULL,
+    sku VARCHAR(100) REFERENCES inventory(sku) ON UPDATE CASCADE,
+    date TIMESTAMP WITHOUT TIME ZONE,
+    qty_delta INTEGER NOT NULL,
+    unit_cost NUMERIC(18, 4) NOT NULL,
+    reason TEXT,
+    created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_adjustments_sku_date ON inventory_adjustments(sku, date);

@@ -26,6 +26,9 @@ app.MapPost("/api/purchases", async (List<PurchaseLogDto> purchases) =>
 
     try
     {
+        // Serialize concurrent writers on this branch so the MAX()+1 ID assignment below can't race.
+        await db.ExecuteAsync("SELECT pg_advisory_xact_lock(hashtext('inventory-write:Office'))", transaction: transaction);
+
         // 1. Grab the highest existing IDs to simulate auto-increment
         int nextPurchaseId = await db.ExecuteScalarAsync<int>("SELECT COALESCE(MAX(local_id), 0) FROM purchase_logs WHERE branch_name = 'Office'", transaction);
         int nextLotId = await db.ExecuteScalarAsync<int>("SELECT COALESCE(MAX(lot_id), 0) FROM inventory_lots WHERE branch_name = 'Office'", transaction);
@@ -42,9 +45,9 @@ app.MapPost("/api/purchases", async (List<PurchaseLogDto> purchases) =>
                 new { LocalId = nextPurchaseId, p.TransactionId, p.Date, p.SKU, p.Qty, p.UnitCost, p.Supplier }, transaction);
 
             await db.ExecuteAsync(@"
-                INSERT INTO inventory_lots (branch_name, lot_id, sku, date_received, original_qty, remaining_qty, unit_cost)
-                VALUES ('Office', @LotId, @SKU, @Date, @Qty, @Qty, @UnitCost)",
-                new { LotId = nextLotId, p.SKU, p.Date, p.Qty, p.UnitCost }, transaction);
+                INSERT INTO inventory_lots (branch_name, lot_id, sku, date_received, original_qty, remaining_qty, unit_cost, purchase_transaction_id)
+                VALUES ('Office', @LotId, @SKU, @Date, @Qty, @Qty, @UnitCost, @TransactionId)",
+                new { LotId = nextLotId, p.SKU, p.Date, p.Qty, p.UnitCost, p.TransactionId }, transaction);
         }
         await transaction.CommitAsync();
         return Results.Ok();
@@ -63,6 +66,11 @@ app.MapPost("/api/deliveries", async (List<DeliveryLogDto> deliveries) =>
 
     try
     {
+        // Serialize concurrent writers on this branch: protects the MAX()+1 ID assignment below,
+        // and also stops two concurrent deliveries from both reading the same lot's remaining_qty
+        // before either commits (see the FOR UPDATE on the lot query below for the same reason).
+        await db.ExecuteAsync("SELECT pg_advisory_xact_lock(hashtext('inventory-write:Office'))", transaction: transaction);
+
         int nextDeliveryId = await db.ExecuteScalarAsync<int>("SELECT COALESCE(MAX(local_id), 0) FROM delivery_logs WHERE branch_name = 'Office'", transaction);
         var insertedRows = new List<DeliveryLog>();
 
@@ -77,11 +85,15 @@ app.MapPost("/api/deliveries", async (List<DeliveryLogDto> deliveries) =>
             // date_received only carries a date (no time), so purchases entered on the same day
             // tie on the first sort key; lot_id (assigned in purchase order) breaks the tie so FIFO
             // stays deterministic instead of depending on Postgres's arbitrary tie-break order.
+            // FOR UPDATE locks these rows so a concurrent request touching the same SKU has to wait
+            // instead of reading the same pre-deduction remaining_qty (which would let both requests
+            // deduct from the same stock and drive remaining_qty negative).
             var lots = await db.QueryAsync<LotRow>(@"
                 SELECT lot_id AS LotId, remaining_qty AS RemainingQty, unit_cost AS UnitCost
                 FROM inventory_lots
                 WHERE sku = @SKU AND remaining_qty > 0
-                ORDER BY date_received ASC, lot_id ASC", new { d.SKU }, transaction);
+                ORDER BY date_received ASC, lot_id ASC
+                FOR UPDATE", new { d.SKU }, transaction);
 
             foreach (var lot in lots)
             {
@@ -151,12 +163,15 @@ app.MapDelete("/api/purchases/{id}", async (string id) => {
         var lines = await db.QueryAsync("SELECT sku, qty, unit_cost FROM purchase_logs WHERE transaction_id = @id", new { id }, tx);
         foreach (var line in lines)
         {
+            // Matches lots back to this specific purchase ticket via purchase_transaction_id rather
+            // than sku+qty+unit_cost, which could otherwise match (and delete) lots belonging to a
+            // different ticket that happened to share the same sku/qty/cost.
             int consumed = await db.ExecuteScalarAsync<int>(
-                "SELECT COALESCE(SUM(original_qty - remaining_qty), 0) FROM inventory_lots WHERE sku = @sku AND original_qty = @qty AND unit_cost = @cost",
-                new { sku = line.sku, qty = line.qty, cost = line.unit_cost }, tx);
+                "SELECT COALESCE(SUM(original_qty - remaining_qty), 0) FROM inventory_lots WHERE purchase_transaction_id = @id AND sku = @sku",
+                new { id, sku = line.sku }, tx);
             if (consumed > 0) throw new Exception($"Cannot delete ticket: {line.sku} has already been used in deliveries.");
 
-            await db.ExecuteAsync("DELETE FROM inventory_lots WHERE sku = @sku AND original_qty = @qty AND unit_cost = @cost", new { sku = line.sku, qty = line.qty, cost = line.unit_cost }, tx);
+            await db.ExecuteAsync("DELETE FROM inventory_lots WHERE purchase_transaction_id = @id AND sku = @sku", new { id, sku = line.sku }, tx);
         }
         await db.ExecuteAsync("DELETE FROM purchase_logs WHERE transaction_id = @id", new { id }, tx);
         await tx.CommitAsync();
@@ -184,6 +199,9 @@ app.MapDelete("/api/deliveries/{id}", async (string id) => {
     using var tx = await db.BeginTransactionAsync();
     try
     {
+        // Serialize concurrent writers on this branch so the MAX()+1 lot ID assignment below can't race.
+        await db.ExecuteAsync("SELECT pg_advisory_xact_lock(hashtext('inventory-write:Office'))", transaction: tx);
+
         var lines = await db.QueryAsync("SELECT sku, qty, total_line_cost FROM delivery_logs WHERE transaction_id = @id", new { id }, tx);
         int nextLotId = await db.ExecuteScalarAsync<int>("SELECT COALESCE(MAX(lot_id), 0) FROM inventory_lots WHERE branch_name = 'Office'", tx);
         foreach (var item in lines)
@@ -275,6 +293,11 @@ app.MapPost("/api/inventory/{sku}/adjust", async (string sku, AdjustInventoryDto
 
     try
     {
+        // Serialize concurrent writers on this branch: protects the MAX()+1 lot ID assignment below,
+        // and (together with the FOR UPDATE in the shrinkage branch) stops a concurrent delivery or
+        // adjustment from reading the same lot's remaining_qty before either commits.
+        await db.ExecuteAsync("SELECT pg_advisory_xact_lock(hashtext('inventory-write:Office'))", transaction: transaction);
+
         int currentTotal = await db.ExecuteScalarAsync<int>(
             "SELECT COALESCE(SUM(remaining_qty), 0) FROM inventory_lots WHERE sku = @sku", new { sku }, transaction);
         int delta = dto.NewCount - currentTotal;
@@ -314,7 +337,8 @@ app.MapPost("/api/inventory/{sku}/adjust", async (string sku, AdjustInventoryDto
                 SELECT lot_id AS LotId, remaining_qty AS RemainingQty, unit_cost AS UnitCost
                 FROM inventory_lots
                 WHERE sku = @sku AND remaining_qty > 0
-                ORDER BY date_received ASC, lot_id ASC", new { sku }, transaction);
+                ORDER BY date_received ASC, lot_id ASC
+                FOR UPDATE", new { sku }, transaction);
 
             decimal totalCostRemoved = 0;
             foreach (var lot in lots)
