@@ -852,6 +852,10 @@ app.MapPost("/api/sales", async (List<PosSaleDto> sales) =>
         else if (sale.TotalAmount < 0) invalid = "Sale total cannot be negative.";
         else if (sale.Lines.Any(l => l.SKU != null && l.Qty <= 0)) invalid = "Product line Qty must be greater than zero.";
         else if (sale.Lines.Any(l => l.SKU == null && l.LineTotal > 0)) invalid = "Discount lines (no SKU) cannot be positive.";
+        // Defense-in-depth against client-side money drift (e.g. a mis-stored local total):
+        // the server is the one place that can catch a mismatch before it's committed.
+        else if (Math.Abs(sale.Lines.Sum(l => l.LineTotal) - sale.TotalAmount) > 0.01m)
+            invalid = "Sale total does not match the sum of its lines.";
 
         if (invalid != null)
         {
