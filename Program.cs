@@ -378,10 +378,13 @@ app.MapPatch("/api/inventory/{sku}/deactivate", async (string sku) =>
     return rows == 0 ? Results.NotFound() : Results.Ok();
 });
 
-// Reconciles the system's stock with a physical count. Used when a manual inventory
+// Reconciles a branch's stock with a physical count. Used when a manual inventory
 // count (see the client's "print all inventory" count sheet) finds a discrepancy.
+// Branch defaults to 'Office' (central stock) but can target any branch's own lots.
 app.MapPost("/api/inventory/{sku}/adjust", async (string sku, AdjustInventoryDto dto) =>
 {
+    string branch = string.IsNullOrWhiteSpace(dto.Branch) ? "Office" : dto.Branch;
+
     using var db = new NpgsqlConnection(connectionString);
     await db.OpenAsync();
     using var transaction = await db.BeginTransactionAsync();
@@ -391,13 +394,13 @@ app.MapPost("/api/inventory/{sku}/adjust", async (string sku, AdjustInventoryDto
         // Serialize concurrent writers on this branch: protects the MAX()+1 lot ID assignment below,
         // and (together with the FOR UPDATE in the shrinkage branch) stops a concurrent delivery or
         // adjustment from reading the same lot's remaining_qty before either commits.
-        await db.ExecuteAsync("SELECT pg_advisory_xact_lock(hashtext('inventory-write:Office'))", transaction: transaction);
+        await db.ExecuteAsync("SELECT pg_advisory_xact_lock(hashtext('inventory-write:' || @branch))", new { branch }, transaction);
 
-        // branch_name = 'Office' throughout: this endpoint reconciles Office stock only.
-        // Without it, currentTotal would sum every branch's lots (so the delta is wrong)
-        // and the shrinkage UPDATE could hit a same-numbered lot in another branch.
+        // Every read/write is scoped to @branch: lot_id is only unique per branch
+        // (UNIQUE (branch_name, lot_id)), so an unscoped currentTotal would sum other
+        // branches' stock and an unscoped UPDATE could decrement a same-numbered lot elsewhere.
         int currentTotal = await db.ExecuteScalarAsync<int>(
-            "SELECT COALESCE(SUM(remaining_qty), 0) FROM inventory_lots WHERE sku = @sku AND branch_name = 'Office'", new { sku }, transaction);
+            "SELECT COALESCE(SUM(remaining_qty), 0) FROM inventory_lots WHERE sku = @sku AND branch_name = @branch", new { sku, branch }, transaction);
         int delta = dto.NewCount - currentTotal;
 
         if (delta == 0)
@@ -411,19 +414,19 @@ app.MapPost("/api/inventory/{sku}/adjust", async (string sku, AdjustInventoryDto
         if (delta > 0)
         {
             // Found more stock than the system expected. Cost the new lot at whatever the
-            // caller specified; otherwise fall back to the SKU's most recent purchase cost
-            // (or 0 if it's never been purchased) so the stock isn't recorded as worthless.
+            // caller specified; otherwise fall back to the SKU's most recent cost in this
+            // branch (or 0 if none) so the stock isn't recorded as worthless.
             costUsed = dto.UnitCost ?? await db.ExecuteScalarAsync<decimal?>(
-                "SELECT unit_cost FROM inventory_lots WHERE sku = @sku AND branch_name = 'Office' ORDER BY date_received DESC, lot_id DESC LIMIT 1",
-                new { sku }, transaction) ?? 0m;
+                "SELECT unit_cost FROM inventory_lots WHERE sku = @sku AND branch_name = @branch ORDER BY date_received DESC, lot_id DESC LIMIT 1",
+                new { sku, branch }, transaction) ?? 0m;
 
             int nextLotId = await db.ExecuteScalarAsync<int>(
-                "SELECT COALESCE(MAX(lot_id), 0) FROM inventory_lots WHERE branch_name = 'Office'", transaction) + 1;
+                "SELECT COALESCE(MAX(lot_id), 0) FROM inventory_lots WHERE branch_name = @branch", new { branch }, transaction) + 1;
 
             await db.ExecuteAsync(@"
                 INSERT INTO inventory_lots (branch_name, lot_id, sku, date_received, original_qty, remaining_qty, unit_cost)
-                VALUES ('Office', @LotId, @sku, CURRENT_TIMESTAMP, @Qty, @Qty, @UnitCost)",
-                new { LotId = nextLotId, sku, Qty = delta, UnitCost = costUsed }, transaction);
+                VALUES (@branch, @LotId, @sku, CURRENT_TIMESTAMP, @Qty, @Qty, @UnitCost)",
+                new { branch, LotId = nextLotId, sku, Qty = delta, UnitCost = costUsed }, transaction);
         }
         else
         {
@@ -434,9 +437,9 @@ app.MapPost("/api/inventory/{sku}/adjust", async (string sku, AdjustInventoryDto
             var lots = await db.QueryAsync<LotRow>(@"
                 SELECT lot_id AS LotId, remaining_qty AS RemainingQty, unit_cost AS UnitCost
                 FROM inventory_lots
-                WHERE sku = @sku AND remaining_qty > 0 AND branch_name = 'Office'
+                WHERE sku = @sku AND remaining_qty > 0 AND branch_name = @branch
                 ORDER BY date_received ASC, lot_id ASC
-                FOR UPDATE", new { sku }, transaction);
+                FOR UPDATE", new { sku, branch }, transaction);
 
             decimal totalCostRemoved = 0;
             foreach (var lot in lots)
@@ -448,8 +451,8 @@ app.MapPost("/api/inventory/{sku}/adjust", async (string sku, AdjustInventoryDto
                 totalCostRemoved += qtyFromThisLot * lot.UnitCost;
 
                 await db.ExecuteAsync(
-                    "UPDATE inventory_lots SET remaining_qty = remaining_qty - @Take WHERE lot_id = @LotId AND branch_name = 'Office'",
-                    new { Take = qtyFromThisLot, LotId = lot.LotId }, transaction);
+                    "UPDATE inventory_lots SET remaining_qty = remaining_qty - @Take WHERE lot_id = @LotId AND branch_name = @branch",
+                    new { Take = qtyFromThisLot, LotId = lot.LotId, branch }, transaction);
             }
 
             // qtyToRemove > 0 here would mean the count claims less stock exists than what we
@@ -459,8 +462,8 @@ app.MapPost("/api/inventory/{sku}/adjust", async (string sku, AdjustInventoryDto
 
         await db.ExecuteAsync(@"
             INSERT INTO inventory_adjustments (branch_name, sku, date, qty_delta, unit_cost, reason)
-            VALUES ('Office', @sku, CURRENT_TIMESTAMP, @Delta, @CostUsed, @Reason)",
-            new { sku, Delta = delta, CostUsed = costUsed, dto.Reason }, transaction);
+            VALUES (@branch, @sku, CURRENT_TIMESTAMP, @Delta, @CostUsed, @Reason)",
+            new { branch, sku, Delta = delta, CostUsed = costUsed, dto.Reason }, transaction);
 
         await transaction.CommitAsync();
         return Results.Ok();
@@ -472,16 +475,17 @@ app.MapPost("/api/inventory/{sku}/adjust", async (string sku, AdjustInventoryDto
     }
 });
 
-app.MapGet("/api/inventory/adjustments", async (DateTime start, DateTime end) =>
+app.MapGet("/api/inventory/adjustments", async (DateTime start, DateTime end, string? branch) =>
 {
     using var db = new NpgsqlConnection(connectionString);
     var sql = @"
         SELECT a.date AS Date, a.sku AS SKU, i.brand AS Brand, i.base_name AS BaseName,
-               a.qty_delta AS QtyDelta, a.unit_cost AS UnitCost, a.reason AS Reason
+               a.qty_delta AS QtyDelta, a.unit_cost AS UnitCost, a.reason AS Reason, a.branch_name AS Branch
         FROM inventory_adjustments a LEFT JOIN inventory i ON a.sku = i.sku
         WHERE a.date >= @start AND a.date <= @end
+          AND (@branch IS NULL OR a.branch_name = @branch)
         ORDER BY a.date DESC";
-    return Results.Ok(await db.QueryAsync<InventoryAdjustmentRow>(sql, new { start, end }));
+    return Results.Ok(await db.QueryAsync<InventoryAdjustmentRow>(sql, new { start, end, branch }));
 });
 
 app.Run();
@@ -526,6 +530,7 @@ public class AdjustInventoryDto
     public int NewCount { get; set; }
     public decimal? UnitCost { get; set; }
     public string Reason { get; set; } = string.Empty;
+    public string Branch { get; set; } = "Office";
 }
 
 public class InventoryAdjustmentRow
@@ -537,6 +542,7 @@ public class InventoryAdjustmentRow
     public int QtyDelta { get; set; }
     public decimal UnitCost { get; set; }
     public string Reason { get; set; } = string.Empty;
+    public string Branch { get; set; } = string.Empty;
 }
 
 public class DeliveryLogDto
