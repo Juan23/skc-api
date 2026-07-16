@@ -468,6 +468,25 @@ app.MapPut("/api/inventory/{sku}/classification", async (string sku, ClassifyInv
     return rows == 0 ? Results.NotFound() : Results.Ok();
 });
 
+// Sets a product's selling price - the single company-wide price list the POS sells at.
+// Sellable = price > 0: category can't determine sellability (candles are RawMaterial by
+// taxonomy but sellable; chiffon is a BakedGood but an unsellable intermediary), so the
+// owner simply prices what's sellable and leaves raw materials/intermediaries at 0.
+// Owner-gated (like recipes): prices are managed from the SKC Admin app only, though the
+// office app's Add Item still sets an initial price at product creation.
+app.MapPut("/api/inventory/{sku}/price", async (string sku, SetPriceDto dto, HttpContext http) =>
+{
+    if (!IsOwnerCaller(http)) return Results.Problem("This endpoint is restricted to the owner's device.", statusCode: 403);
+
+    if (dto.Price < 0) return Results.BadRequest("Price cannot be negative.");
+
+    using var db = new NpgsqlConnection(connectionString);
+    int rows = await db.ExecuteAsync(
+        "UPDATE inventory SET price = @Price, last_updated = CURRENT_TIMESTAMP WHERE sku = @sku",
+        new { dto.Price, sku });
+    return rows == 0 ? Results.NotFound() : Results.Ok();
+});
+
 // Reconciles a branch's stock with a physical count. Used when a manual inventory
 // count (see the client's "print all inventory" count sheet) finds a discrepancy.
 // Branch defaults to 'Office' (central stock) but can target any branch's own lots.
@@ -806,6 +825,168 @@ app.MapGet("/api/production", async (string branch, DateTime? start, DateTime? e
     return Results.Ok(await db.QueryAsync<ProductionBatchRow>(sql, new { branch, start, end }));
 });
 
+// POS sale sync: the branch app queues sales in a local SQLite db while offline and pushes
+// them here in batches. Idempotent by (branch_name, client_sale_id) - a GUID the POS mints
+// at the counter - so retries and double-pushes are the normal path, not an error. Each sale
+// gets its own transaction (one bad sale must not block the rest of the batch draining).
+// A sale is NEVER rejected for insufficient stock: FIFO consumes what exists and records
+// the uncovered remainder as shortfall_qty (oversell is warn-but-allow at the counter,
+// because recording production requires connectivity and sales must not stop).
+// Deliberately not IP-gated yet, like /accept and /api/production - branch PCs aren't on
+// Tailscale; this joins the future branch_name -> ip map when they are.
+app.MapPost("/api/sales", async (List<PosSaleDto> sales) =>
+{
+    var results = new List<PosSaleSyncResult>();
+
+    using var db = new NpgsqlConnection(connectionString);
+    await db.OpenAsync();
+
+    foreach (var sale in sales)
+    {
+        // Cheap validation first, before touching the db at all.
+        string? invalid = null;
+        if (string.IsNullOrWhiteSpace(sale.ClientSaleId)) invalid = "ClientSaleId is required.";
+        else if (string.IsNullOrWhiteSpace(sale.Branch)) invalid = "Branch is required.";
+        else if (string.IsNullOrWhiteSpace(sale.StaffName)) invalid = "StaffName is required.";
+        else if (sale.Lines.Count == 0) invalid = "A sale needs at least one line.";
+        else if (sale.TotalAmount < 0) invalid = "Sale total cannot be negative.";
+        else if (sale.Lines.Any(l => l.SKU != null && l.Qty <= 0)) invalid = "Product line Qty must be greater than zero.";
+        else if (sale.Lines.Any(l => l.SKU == null && l.LineTotal > 0)) invalid = "Discount lines (no SKU) cannot be positive.";
+
+        if (invalid != null)
+        {
+            results.Add(new PosSaleSyncResult { ClientSaleId = sale.ClientSaleId, Status = "Rejected", Detail = invalid });
+            continue;
+        }
+
+        using var tx = await db.BeginTransactionAsync();
+        try
+        {
+            // Same per-branch serialization as every other FIFO writer (accept/adjust/deliver/produce).
+            await db.ExecuteAsync("SELECT pg_advisory_xact_lock(hashtext('inventory-write:' || @Branch))", new { sale.Branch }, tx);
+
+            int already = await db.ExecuteScalarAsync<int>(
+                "SELECT COUNT(*) FROM pos_sales WHERE branch_name = @Branch AND client_sale_id = @ClientSaleId",
+                new { sale.Branch, sale.ClientSaleId }, tx);
+            if (already > 0)
+            {
+                await tx.RollbackAsync();
+                results.Add(new PosSaleSyncResult { ClientSaleId = sale.ClientSaleId, Status = "AlreadySynced", Detail = "" });
+                continue;
+            }
+
+            // Every product line must reference a real, active SKU - the POS catalog cache
+            // should make this impossible, so a miss means a stale/hand-built payload.
+            foreach (var line in sale.Lines.Where(l => l.SKU != null))
+            {
+                int known = await db.ExecuteScalarAsync<int>(
+                    "SELECT COUNT(*) FROM inventory WHERE sku = @SKU AND is_active = true", new { line.SKU }, tx);
+                if (known == 0) throw new Exception($"Unknown or inactive SKU '{line.SKU}'.");
+            }
+
+            int nextLocalId = await db.ExecuteScalarAsync<int>(
+                "SELECT COALESCE(MAX(local_id), 0) FROM pos_sales WHERE branch_name = @Branch", new { sale.Branch }, tx) + 1;
+
+            await db.ExecuteAsync(@"
+                INSERT INTO pos_sales (branch_name, local_id, client_sale_id, staff_name, sold_at, total_amount)
+                VALUES (@Branch, @LocalId, @ClientSaleId, @StaffName, @SoldAt, @TotalAmount)",
+                new { sale.Branch, LocalId = nextLocalId, sale.ClientSaleId, sale.StaffName, sale.SoldAt, sale.TotalAmount }, tx);
+
+            int totalShortfall = 0;
+            foreach (var line in sale.Lines)
+            {
+                int shortfall = 0;
+                decimal consumedCost = 0;
+
+                if (line.SKU != null)
+                {
+                    // FIFO-consume from the branch's own lots; unlike production, a shortage
+                    // doesn't throw - the uncovered remainder is recorded on the line.
+                    var lots = await db.QueryAsync<LotRow>(@"
+                        SELECT lot_id AS LotId, remaining_qty AS RemainingQty, unit_cost AS UnitCost
+                        FROM inventory_lots
+                        WHERE sku = @SKU AND remaining_qty > 0 AND branch_name = @Branch
+                        ORDER BY date_received ASC, lot_id ASC
+                        FOR UPDATE", new { line.SKU, sale.Branch }, tx);
+
+                    int remaining = line.Qty;
+                    foreach (var lot in lots)
+                    {
+                        if (remaining <= 0) break;
+                        int take = Math.Min(remaining, lot.RemainingQty);
+                        remaining -= take;
+                        consumedCost += take * lot.UnitCost;
+
+                        await db.ExecuteAsync(
+                            "UPDATE inventory_lots SET remaining_qty = remaining_qty - @Take WHERE lot_id = @LotId AND branch_name = @Branch",
+                            new { Take = take, lot.LotId, sale.Branch }, tx);
+                    }
+
+                    shortfall = remaining;
+                    totalShortfall += shortfall;
+                }
+
+                await db.ExecuteAsync(@"
+                    INSERT INTO pos_sale_lines (branch_name, client_sale_id, sku, description, qty, unit_price, line_total, shortfall_qty, consumed_cost)
+                    VALUES (@Branch, @ClientSaleId, @SKU, @Description, @Qty, @UnitPrice, @LineTotal, @Shortfall, @ConsumedCost)",
+                    new { sale.Branch, sale.ClientSaleId, line.SKU, line.Description, line.Qty, line.UnitPrice, line.LineTotal,
+                          Shortfall = shortfall, ConsumedCost = consumedCost }, tx);
+            }
+
+            await tx.CommitAsync();
+            results.Add(new PosSaleSyncResult
+            {
+                ClientSaleId = sale.ClientSaleId,
+                Status = totalShortfall > 0 ? "SyncedWithShortfall" : "Synced",
+                Detail = totalShortfall > 0 ? $"Stock short by {totalShortfall} across the sale - record baking/decorating." : ""
+            });
+        }
+        catch (PostgresException ex) when (ex.SqlState == "23505")
+        {
+            // Two clients raced the same client_sale_id past the COUNT check; the UNIQUE
+            // constraint is the backstop and the sale is safely on the server already.
+            await tx.RollbackAsync();
+            results.Add(new PosSaleSyncResult { ClientSaleId = sale.ClientSaleId, Status = "AlreadySynced", Detail = "" });
+        }
+        catch (Exception ex)
+        {
+            await tx.RollbackAsync();
+            results.Add(new PosSaleSyncResult { ClientSaleId = sale.ClientSaleId, Status = "Rejected", Detail = ex.Message });
+        }
+    }
+
+    return Results.Ok(results);
+});
+
+// Sales history for the office's Branch Sales Report. start/end are required (not
+// DateTime?) to sidestep the Npgsql nullable-DateTime type-inference bug documented
+// on /api/production above.
+app.MapGet("/api/sales", async (string branch, DateTime start, DateTime end) =>
+{
+    using var db = new NpgsqlConnection(connectionString);
+    var sql = @"
+        SELECT s.local_id AS LocalId, s.client_sale_id AS ClientSaleId, s.staff_name AS StaffName,
+               s.sold_at AS SoldAt, s.total_amount AS TotalAmount,
+               COALESCE((SELECT SUM(l.shortfall_qty) FROM pos_sale_lines l
+                         WHERE l.branch_name = s.branch_name AND l.client_sale_id = s.client_sale_id), 0) > 0 AS HasShortfall
+        FROM pos_sales s
+        WHERE s.branch_name = @branch AND s.sold_at >= @start AND s.sold_at <= @end
+        ORDER BY s.sold_at DESC";
+    return Results.Ok(await db.QueryAsync<PosSaleSummaryRow>(sql, new { branch, start, end }));
+});
+
+app.MapGet("/api/sales/{branch}/{clientSaleId}", async (string branch, string clientSaleId) =>
+{
+    using var db = new NpgsqlConnection(connectionString);
+    var lines = (await db.QueryAsync<PosSaleLineRow>(@"
+        SELECT sku AS SKU, description AS Description, qty AS Qty, unit_price AS UnitPrice,
+               line_total AS LineTotal, shortfall_qty AS ShortfallQty
+        FROM pos_sale_lines
+        WHERE branch_name = @branch AND client_sale_id = @clientSaleId
+        ORDER BY id ASC", new { branch, clientSaleId })).ToList();
+    return lines.Count == 0 ? Results.NotFound() : Results.Ok(lines);
+});
+
 app.Run();
 
 // DTO Schemas matching the SQLite structures
@@ -880,6 +1061,57 @@ public class InventoryItemDto
     public string BaseName { get; set; } = string.Empty;
     public decimal Price { get; set; }
     public bool IsActive { get; set; }
+}
+
+public class SetPriceDto
+{
+    public decimal Price { get; set; }
+}
+
+public class PosSaleLineDto
+{
+    public string? SKU { get; set; } // null = discount line (no inventory effect)
+    public string Description { get; set; } = string.Empty;
+    public int Qty { get; set; }
+    public decimal UnitPrice { get; set; }
+    public decimal LineTotal { get; set; }
+}
+
+public class PosSaleDto
+{
+    public string ClientSaleId { get; set; } = string.Empty; // GUID minted offline by the POS
+    public string Branch { get; set; } = string.Empty;
+    public string StaffName { get; set; } = string.Empty;
+    public DateTime SoldAt { get; set; } // counter time, not sync time
+    public decimal TotalAmount { get; set; }
+    public List<PosSaleLineDto> Lines { get; set; } = new();
+}
+
+public class PosSaleSyncResult
+{
+    public string ClientSaleId { get; set; } = string.Empty;
+    public string Status { get; set; } = string.Empty; // Synced | AlreadySynced | SyncedWithShortfall | Rejected
+    public string Detail { get; set; } = string.Empty;
+}
+
+public class PosSaleSummaryRow
+{
+    public int LocalId { get; set; }
+    public string ClientSaleId { get; set; } = string.Empty;
+    public string StaffName { get; set; } = string.Empty;
+    public DateTime SoldAt { get; set; }
+    public decimal TotalAmount { get; set; }
+    public bool HasShortfall { get; set; }
+}
+
+public class PosSaleLineRow
+{
+    public string? SKU { get; set; }
+    public string Description { get; set; } = string.Empty;
+    public int Qty { get; set; }
+    public decimal UnitPrice { get; set; }
+    public decimal LineTotal { get; set; }
+    public int ShortfallQty { get; set; }
 }
 
 public class PurchaseLogDto
