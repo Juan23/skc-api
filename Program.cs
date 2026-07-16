@@ -258,7 +258,7 @@ app.MapPost("/api/deliveries/{transactionId}/accept", async (string transactionI
         // Lock the ticket's rows so concurrent accepts (double-click, two devices)
         // serialize instead of both succeeding.
         var rows = (await db.QueryAsync(
-            "SELECT to_branch, status FROM delivery_logs WHERE transaction_id = @transactionId FOR UPDATE",
+            "SELECT to_branch, status, sku, qty, total_line_cost FROM delivery_logs WHERE transaction_id = @transactionId FOR UPDATE",
             new { transactionId }, tx)).ToList();
 
         if (rows.Count == 0)
@@ -277,6 +277,24 @@ app.MapPost("/api/deliveries/{transactionId}/accept", async (string transactionI
             return Results.Conflict($"Ticket {transactionId} has already been accepted.");
         }
 
+        // Credit the receiving branch's own FIFO ledger with one lot per delivery_logs row
+        // consumed. Each row already corresponds to exactly one FIFO chunk taken from Office,
+        // so total_line_cost / qty recovers that chunk's original unit cost exactly (same
+        // recompute idiom already used above in DELETE /api/deliveries/{id}).
+        await db.ExecuteAsync("SELECT pg_advisory_xact_lock(hashtext('inventory-write:' || @Branch))", new { dto.Branch }, tx);
+        int nextLotId = await db.ExecuteScalarAsync<int>(
+            "SELECT COALESCE(MAX(lot_id), 0) FROM inventory_lots WHERE branch_name = @Branch", new { dto.Branch }, tx);
+        foreach (var row in rows)
+        {
+            if (row.qty <= 0) continue;
+            nextLotId++;
+            decimal unitCost = row.total_line_cost / row.qty;
+            await db.ExecuteAsync(@"
+                INSERT INTO inventory_lots (branch_name, lot_id, sku, date_received, original_qty, remaining_qty, unit_cost)
+                VALUES (@Branch, @LotId, @sku, CURRENT_TIMESTAMP, @qty, @qty, @UnitCost)",
+                new { dto.Branch, LotId = nextLotId, sku = row.sku, qty = row.qty, UnitCost = unitCost }, tx);
+        }
+
         await db.ExecuteAsync(@"UPDATE delivery_logs
             SET status = 'Accepted', accepted_by = @AcceptedBy, accepted_at = CURRENT_TIMESTAMP
             WHERE transaction_id = @transactionId", new { dto.AcceptedBy, transactionId }, tx);
@@ -290,15 +308,33 @@ app.MapPost("/api/deliveries/{transactionId}/accept", async (string transactionI
 app.MapGet("/api/inventory", async () =>
 {
     using var db = new NpgsqlConnection(connectionString);
+    // Scoped to Office explicitly: now that branches can hold their own credited lots
+    // (see POST /api/deliveries/{id}/accept), an unscoped SUM here would blend every
+    // branch's stock into the central/office figure this endpoint is meant to report.
     var products = await db.QueryAsync(@"
-        SELECT 
-            i.sku AS SKU, 
-            i.brand AS Brand, 
-            i.base_name AS BaseName, 
+        SELECT
+            i.sku AS SKU,
+            i.brand AS Brand,
+            i.base_name AS BaseName,
             i.price AS Price,
-            COALESCE((SELECT SUM(remaining_qty) FROM inventory_lots l WHERE l.sku = i.sku), 0) AS CurrentStock
-        FROM inventory i 
+            COALESCE((SELECT SUM(remaining_qty) FROM inventory_lots l WHERE l.sku = i.sku AND l.branch_name = 'Office'), 0) AS CurrentStock
+        FROM inventory i
         WHERE i.is_active = true");
+    return Results.Ok(products);
+});
+
+app.MapGet("/api/inventory/branch/{branch}", async (string branch) =>
+{
+    using var db = new NpgsqlConnection(connectionString);
+    var products = await db.QueryAsync(@"
+        SELECT
+            i.sku AS SKU,
+            i.brand AS Brand,
+            i.base_name AS BaseName,
+            i.price AS Price,
+            COALESCE((SELECT SUM(remaining_qty) FROM inventory_lots l WHERE l.sku = i.sku AND l.branch_name = @branch), 0) AS CurrentStock
+        FROM inventory i
+        WHERE i.is_active = true", new { branch });
     return Results.Ok(products);
 });
 
