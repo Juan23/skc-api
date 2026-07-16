@@ -47,12 +47,30 @@ bool IsOwnerCaller(HttpContext http)
     return ip.ToString() == OwnerIp;
 }
 
+// Shared validation for recipe create/update. Kind mirrors the DB's chk_recipe_kind
+// constraint and quantities must be positive, so a bad value gets a clean 400 instead of
+// either a raw Postgres constraint-violation message or a recipe that silently produces
+// nothing (see POST /api/production's OutputQty=0 case for what a zero-qty recipe does).
+string? ValidateRecipeDto(RecipeDto dto)
+{
+    if (dto.Kind != "Baking" && dto.Kind != "Decorating")
+        return "Kind must be Baking or Decorating.";
+    if (dto.OutputQty <= 0)
+        return "OutputQty must be greater than zero.";
+    if (dto.Lines.Any(l => l.Qty <= 0))
+        return "Each recipe line's Qty must be greater than zero.";
+    return null;
+}
+
 // Endpoints
 app.MapGet("/health", () => Results.Ok(new { Status = "Healthy" }));
 
 app.MapPost("/api/purchases", async (List<PurchaseLogDto> purchases, HttpContext http) =>
 {
     if (!IsTrustedOfficeCaller(http)) return Results.Problem("This endpoint is restricted to trusted office devices.", statusCode: 403);
+    // A zero/negative Qty used to silently no-op (no lot created, no error) instead of being
+    // rejected - reject it up front so a bad line fails the whole ticket instead of vanishing.
+    if (purchases.Any(p => p.Qty <= 0)) return Results.BadRequest("Qty must be greater than zero for every purchase line.");
 
     using var db = new NpgsqlConnection(connectionString);
     await db.OpenAsync();
@@ -95,6 +113,8 @@ app.MapPost("/api/purchases", async (List<PurchaseLogDto> purchases, HttpContext
 app.MapPost("/api/deliveries", async (List<DeliveryLogDto> deliveries, HttpContext http) =>
 {
     if (!IsTrustedOfficeCaller(http)) return Results.Problem("This endpoint is restricted to trusted office devices.", statusCode: 403);
+    // Same as purchases: a zero/negative Qty used to silently no-op instead of being rejected.
+    if (deliveries.Any(d => d.Qty <= 0)) return Results.BadRequest("Qty must be greater than zero for every delivery line.");
 
     using var db = new NpgsqlConnection(connectionString);
     await db.OpenAsync();
@@ -455,6 +475,13 @@ app.MapPost("/api/inventory/{sku}/adjust", async (string sku, AdjustInventoryDto
 {
     if (!IsTrustedOfficeCaller(http)) return Results.Problem("This endpoint is restricted to trusted office devices.", statusCode: 403);
 
+    // A physical count can't be negative. Without this, a negative NewCount makes the
+    // shrinkage branch below try to remove more stock than currentTotal actually holds -
+    // the FIFO loop just exhausts early, but qty_delta/costUsed still get recorded against
+    // the full (un-clamped) requested delta, desyncing inventory_adjustments from what
+    // inventory_lots actually changed by.
+    if (dto.NewCount < 0) return Results.BadRequest("NewCount cannot be negative.");
+
     string branch = string.IsNullOrWhiteSpace(dto.Branch) ? "Office" : dto.Branch;
 
     using var db = new NpgsqlConnection(connectionString);
@@ -599,6 +626,8 @@ app.MapPost("/api/recipes", async (RecipeDto dto, HttpContext http) =>
 {
     if (!IsOwnerCaller(http)) return Results.Problem("This endpoint is restricted to the owner.", statusCode: 403);
     if (dto.Lines == null || dto.Lines.Count == 0) return Results.BadRequest("A recipe needs at least one input line.");
+    var validationError = ValidateRecipeDto(dto);
+    if (validationError != null) return Results.BadRequest(validationError);
 
     using var db = new NpgsqlConnection(connectionString);
     await db.OpenAsync();
@@ -625,6 +654,8 @@ app.MapPut("/api/recipes/{id}", async (int id, RecipeDto dto, HttpContext http) 
 {
     if (!IsOwnerCaller(http)) return Results.Problem("This endpoint is restricted to the owner.", statusCode: 403);
     if (dto.Lines == null || dto.Lines.Count == 0) return Results.BadRequest("A recipe needs at least one input line.");
+    var validationError = ValidateRecipeDto(dto);
+    if (validationError != null) return Results.BadRequest(validationError);
 
     using var db = new NpgsqlConnection(connectionString);
     await db.OpenAsync();
@@ -664,6 +695,12 @@ app.MapPost("/api/production", async (ProductionDto dto) =>
 {
     if (string.IsNullOrWhiteSpace(dto.Branch)) return Results.BadRequest("Branch is required.");
     if (string.IsNullOrWhiteSpace(dto.StaffName)) return Results.BadRequest("StaffName is required.");
+    // BatchMultiplier <= 0 used to sail through as a silent no-op batch (0 consumed, 0 credited,
+    // still recorded); a negative multiplier was only ever caught incidentally by the
+    // chk_remaining_qty_non_negative constraint on inventory_lots, surfacing a raw Postgres
+    // error to a caller of this deliberately-un-IP-gated endpoint. Reject both cleanly up front.
+    if (dto.BatchMultiplier <= 0) return Results.BadRequest("BatchMultiplier must be greater than zero.");
+    if (dto.OutputQty < 0) return Results.BadRequest("OutputQty cannot be negative.");
 
     using var db = new NpgsqlConnection(connectionString);
     await db.OpenAsync();

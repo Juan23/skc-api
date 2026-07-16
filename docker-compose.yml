@@ -23,7 +23,13 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      # Expose port 7290 strictly internally
+      # NOTE: unlike the db service below, this binding has no host IP, so Docker publishes
+      # it on ALL interfaces (0.0.0.0), not just the Tailscale one. This file alone does NOT
+      # restrict access to the tailnet - that protection (if any) currently lives entirely in
+      # the droplet's OS/cloud firewall, outside this repo. Verify that firewall independently;
+      # don't assume this comment or the app's IP-allowlist checks are the only gate (several
+      # endpoints, e.g. GET *, POST /api/deliveries/{id}/accept, POST /api/production, have no
+      # IP-allowlist check at all and rely entirely on that external firewall).
       - "7290:7290"
     environment:
       - ASPNETCORE_ENVIRONMENT=Production
