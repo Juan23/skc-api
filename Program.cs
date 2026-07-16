@@ -88,10 +88,13 @@ app.MapPost("/api/deliveries", async (List<DeliveryLogDto> deliveries) =>
             // FOR UPDATE locks these rows so a concurrent request touching the same SKU has to wait
             // instead of reading the same pre-deduction remaining_qty (which would let both requests
             // deduct from the same stock and drive remaining_qty negative).
+            // branch_name = 'Office' throughout: deliveries only ever draw from Office stock,
+            // and lot_id is only unique per branch (UNIQUE (branch_name, lot_id)), so an
+            // unscoped WHERE lot_id would also hit a same-numbered lot in another branch.
             var lots = await db.QueryAsync<LotRow>(@"
                 SELECT lot_id AS LotId, remaining_qty AS RemainingQty, unit_cost AS UnitCost
                 FROM inventory_lots
-                WHERE sku = @SKU AND remaining_qty > 0
+                WHERE sku = @SKU AND remaining_qty > 0 AND branch_name = 'Office'
                 ORDER BY date_received ASC, lot_id ASC
                 FOR UPDATE", new { d.SKU }, transaction);
 
@@ -106,7 +109,7 @@ app.MapPost("/api/deliveries", async (List<DeliveryLogDto> deliveries) =>
                 await db.ExecuteAsync(@"
                     UPDATE inventory_lots
                     SET remaining_qty = remaining_qty - @Take
-                    WHERE lot_id = @LotId",
+                    WHERE lot_id = @LotId AND branch_name = 'Office'",
                     new { Take = qtyToTake, LotId = lot.LotId }, transaction);
 
                 nextDeliveryId++;
@@ -390,8 +393,11 @@ app.MapPost("/api/inventory/{sku}/adjust", async (string sku, AdjustInventoryDto
         // adjustment from reading the same lot's remaining_qty before either commits.
         await db.ExecuteAsync("SELECT pg_advisory_xact_lock(hashtext('inventory-write:Office'))", transaction: transaction);
 
+        // branch_name = 'Office' throughout: this endpoint reconciles Office stock only.
+        // Without it, currentTotal would sum every branch's lots (so the delta is wrong)
+        // and the shrinkage UPDATE could hit a same-numbered lot in another branch.
         int currentTotal = await db.ExecuteScalarAsync<int>(
-            "SELECT COALESCE(SUM(remaining_qty), 0) FROM inventory_lots WHERE sku = @sku", new { sku }, transaction);
+            "SELECT COALESCE(SUM(remaining_qty), 0) FROM inventory_lots WHERE sku = @sku AND branch_name = 'Office'", new { sku }, transaction);
         int delta = dto.NewCount - currentTotal;
 
         if (delta == 0)
@@ -408,7 +414,7 @@ app.MapPost("/api/inventory/{sku}/adjust", async (string sku, AdjustInventoryDto
             // caller specified; otherwise fall back to the SKU's most recent purchase cost
             // (or 0 if it's never been purchased) so the stock isn't recorded as worthless.
             costUsed = dto.UnitCost ?? await db.ExecuteScalarAsync<decimal?>(
-                "SELECT unit_cost FROM inventory_lots WHERE sku = @sku ORDER BY date_received DESC, lot_id DESC LIMIT 1",
+                "SELECT unit_cost FROM inventory_lots WHERE sku = @sku AND branch_name = 'Office' ORDER BY date_received DESC, lot_id DESC LIMIT 1",
                 new { sku }, transaction) ?? 0m;
 
             int nextLotId = await db.ExecuteScalarAsync<int>(
@@ -428,7 +434,7 @@ app.MapPost("/api/inventory/{sku}/adjust", async (string sku, AdjustInventoryDto
             var lots = await db.QueryAsync<LotRow>(@"
                 SELECT lot_id AS LotId, remaining_qty AS RemainingQty, unit_cost AS UnitCost
                 FROM inventory_lots
-                WHERE sku = @sku AND remaining_qty > 0
+                WHERE sku = @sku AND remaining_qty > 0 AND branch_name = 'Office'
                 ORDER BY date_received ASC, lot_id ASC
                 FOR UPDATE", new { sku }, transaction);
 
@@ -442,7 +448,7 @@ app.MapPost("/api/inventory/{sku}/adjust", async (string sku, AdjustInventoryDto
                 totalCostRemoved += qtyFromThisLot * lot.UnitCost;
 
                 await db.ExecuteAsync(
-                    "UPDATE inventory_lots SET remaining_qty = remaining_qty - @Take WHERE lot_id = @LotId",
+                    "UPDATE inventory_lots SET remaining_qty = remaining_qty - @Take WHERE lot_id = @LotId AND branch_name = 'Office'",
                     new { Take = qtyFromThisLot, LotId = lot.LotId }, transaction);
             }
 
