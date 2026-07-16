@@ -51,14 +51,19 @@ CREATE TABLE IF NOT EXISTS delivery_logs (
     total_line_cost NUMERIC(18, 4) DEFAULT 0.0000,
     requester VARCHAR(100),
     reason TEXT,
+    status VARCHAR(20) NOT NULL DEFAULT 'InTransit', -- acceptance workflow: InTransit until the receiving branch accepts
+    accepted_by VARCHAR(100),
+    accepted_at TIMESTAMP WITHOUT TIME ZONE,
     created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    
+
     -- Prevents double sync of the same delivery
-    CONSTRAINT uq_branch_delivery_log UNIQUE (branch_name, local_id)
+    CONSTRAINT uq_branch_delivery_log UNIQUE (branch_name, local_id),
+    CONSTRAINT chk_delivery_status CHECK (status IN ('InTransit', 'Accepted'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_deliveries_branch_date ON delivery_logs(branch_name, date);
 CREATE INDEX IF NOT EXISTS idx_deliveries_sku ON delivery_logs(sku);
+CREATE INDEX IF NOT EXISTS idx_deliveries_pending ON delivery_logs(to_branch, status);
 
 -- 4. Create Inventory Lots Table (Central FIFO ledger copy)
 CREATE TABLE IF NOT EXISTS inventory_lots (

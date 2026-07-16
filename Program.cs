@@ -182,8 +182,9 @@ app.MapDelete("/api/purchases/{id}", async (string id) => {
 
 app.MapGet("/api/deliveries/tickets", async (DateTime start, DateTime end) => {
     using var db = new NpgsqlConnection(connectionString);
-    var sql = @"SELECT transaction_id AS TransactionId, date AS Date, to_branch AS ToBranch, SUM(qty) AS TotalItems, 
-                       MAX(requester) AS Requester, MAX(reason) AS Reason, SUM(total_line_cost) AS TotalCost 
+    var sql = @"SELECT transaction_id AS TransactionId, date AS Date, to_branch AS ToBranch, SUM(qty) AS TotalItems,
+                       MAX(requester) AS Requester, MAX(reason) AS Reason, SUM(total_line_cost) AS TotalCost,
+                       MIN(status) AS Status
                 FROM delivery_logs WHERE date >= @start AND date <= @end GROUP BY transaction_id, date, to_branch ORDER BY date DESC";
     return Results.Ok(await db.QueryAsync<DeliveryTicketSummary>(sql, new { start, end }));
 });
@@ -201,6 +202,10 @@ app.MapDelete("/api/deliveries/{id}", async (string id) => {
     {
         // Serialize concurrent writers on this branch so the MAX()+1 lot ID assignment below can't race.
         await db.ExecuteAsync("SELECT pg_advisory_xact_lock(hashtext('inventory-write:Office'))", transaction: tx);
+
+        int acceptedRows = await db.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM delivery_logs WHERE transaction_id = @id AND status = 'Accepted'", new { id }, tx);
+        if (acceptedRows > 0) throw new Exception("Cannot delete: this ticket has already been accepted by the branch.");
 
         var lines = await db.QueryAsync("SELECT sku, qty, total_line_cost FROM delivery_logs WHERE transaction_id = @id", new { id }, tx);
         int nextLotId = await db.ExecuteScalarAsync<int>("SELECT COALESCE(MAX(lot_id), 0) FROM inventory_lots WHERE branch_name = 'Office'", tx);
@@ -228,6 +233,57 @@ app.MapGet("/api/deliveries/daily", async (DateTime targetDate) => {
                 FROM delivery_logs d LEFT JOIN inventory i ON d.sku = i.sku 
                 WHERE date(d.date) = date(@targetDate) ORDER BY d.to_branch, d.transaction_id, i.brand, i.base_name";
     return Results.Ok(await db.QueryAsync<DailyDeliveryPrintItem>(sql, new { targetDate }));
+});
+
+// --- BRANCH ACCEPTANCE WORKFLOW ---
+
+app.MapGet("/api/deliveries/pending", async (string branch) => {
+    using var db = new NpgsqlConnection(connectionString);
+    var sql = @"SELECT transaction_id AS TransactionId, date AS Date, to_branch AS ToBranch, SUM(qty) AS TotalItems,
+                       MAX(requester) AS Requester, MAX(reason) AS Reason, SUM(total_line_cost) AS TotalCost,
+                       MIN(status) AS Status
+                FROM delivery_logs WHERE to_branch = @branch AND status = 'InTransit'
+                GROUP BY transaction_id, date, to_branch ORDER BY date ASC";
+    return Results.Ok(await db.QueryAsync<DeliveryTicketSummary>(sql, new { branch }));
+});
+
+app.MapPost("/api/deliveries/{transactionId}/accept", async (string transactionId, AcceptDeliveryDto dto) => {
+    if (string.IsNullOrWhiteSpace(dto.AcceptedBy)) return Results.BadRequest("AcceptedBy is required.");
+
+    using var db = new NpgsqlConnection(connectionString);
+    await db.OpenAsync();
+    using var tx = await db.BeginTransactionAsync();
+    try
+    {
+        // Lock the ticket's rows so concurrent accepts (double-click, two devices)
+        // serialize instead of both succeeding.
+        var rows = (await db.QueryAsync(
+            "SELECT to_branch, status FROM delivery_logs WHERE transaction_id = @transactionId FOR UPDATE",
+            new { transactionId }, tx)).ToList();
+
+        if (rows.Count == 0)
+        {
+            await tx.RollbackAsync();
+            return Results.NotFound($"No delivery found for ticket {transactionId}.");
+        }
+        if (rows[0].to_branch != dto.Branch)
+        {
+            await tx.RollbackAsync();
+            return Results.BadRequest($"Ticket {transactionId} is addressed to {rows[0].to_branch}, not {dto.Branch}.");
+        }
+        if (rows.Any(r => r.status != "InTransit"))
+        {
+            await tx.RollbackAsync();
+            return Results.Conflict($"Ticket {transactionId} has already been accepted.");
+        }
+
+        await db.ExecuteAsync(@"UPDATE delivery_logs
+            SET status = 'Accepted', accepted_by = @AcceptedBy, accepted_at = CURRENT_TIMESTAMP
+            WHERE transaction_id = @transactionId", new { dto.AcceptedBy, transactionId }, tx);
+        await tx.CommitAsync();
+        return Results.Ok();
+    }
+    catch (Exception ex) { await tx.RollbackAsync(); return Results.Problem(ex.Message); }
 });
 
 
@@ -500,6 +556,13 @@ public class DeliveryTicketSummary
     public string Requester { get; set; } = string.Empty;
     public string Reason { get; set; } = string.Empty;
     public decimal TotalCost { get; set; }
+    public string Status { get; set; } = string.Empty;
+}
+
+public class AcceptDeliveryDto
+{
+    public string Branch { get; set; } = string.Empty;
+    public string AcceptedBy { get; set; } = string.Empty;
 }
 
 public class DeliveryLog
