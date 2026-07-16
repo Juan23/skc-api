@@ -34,6 +34,19 @@ bool IsTrustedOfficeCaller(HttpContext http)
     return trustedOfficeIps.Contains(ip.ToString());
 }
 
+// Recipes are the owner's alone (branches never see recipe management, only the
+// finished recipe list read-only for production entry) - stricter than the
+// general office allowlist above, which also includes the office PC.
+const string OwnerIp = "100.108.218.24";
+
+bool IsOwnerCaller(HttpContext http)
+{
+    var ip = http.Connection.RemoteIpAddress;
+    if (ip == null) return false;
+    if (ip.IsIPv4MappedToIPv6) ip = ip.MapToIPv4();
+    return ip.ToString() == OwnerIp;
+}
+
 // Endpoints
 app.MapGet("/health", () => Results.Ok(new { Status = "Healthy" }));
 
@@ -347,6 +360,9 @@ app.MapGet("/api/inventory", async () =>
             i.brand AS Brand,
             i.base_name AS BaseName,
             i.price AS Price,
+            i.category AS Category,
+            i.uom AS Uom,
+            i.pack_multiplier AS PackMultiplier,
             COALESCE((SELECT SUM(remaining_qty) FROM inventory_lots l WHERE l.sku = i.sku AND l.branch_name = 'Office'), 0) AS CurrentStock
         FROM inventory i
         WHERE i.is_active = true");
@@ -362,6 +378,9 @@ app.MapGet("/api/inventory/branch/{branch}", async (string branch) =>
             i.brand AS Brand,
             i.base_name AS BaseName,
             i.price AS Price,
+            i.category AS Category,
+            i.uom AS Uom,
+            i.pack_multiplier AS PackMultiplier,
             COALESCE((SELECT SUM(remaining_qty) FROM inventory_lots l WHERE l.sku = i.sku AND l.branch_name = @branch), 0) AS CurrentStock
         FROM inventory i
         WHERE i.is_active = true", new { branch });
@@ -408,6 +427,24 @@ app.MapPatch("/api/inventory/{sku}/deactivate", async (string sku, HttpContext h
     using var db = new NpgsqlConnection(connectionString);
     int rows = await db.ExecuteAsync(
         "UPDATE inventory SET is_active = false, last_updated = CURRENT_TIMESTAMP WHERE sku = @sku", new { sku });
+    return rows == 0 ? Results.NotFound() : Results.Ok();
+});
+
+// Sets a product's production category and purchase-unit conversion. Office-gated
+// (not owner-only) per the user's instruction: only SKC Bakery Supply edits this.
+app.MapPut("/api/inventory/{sku}/classification", async (string sku, ClassifyInventoryDto dto, HttpContext http) =>
+{
+    if (!IsTrustedOfficeCaller(http)) return Results.Problem("This endpoint is restricted to trusted office devices.", statusCode: 403);
+
+    if (dto.Category != "RawMaterial" && dto.Category != "BakedGood" && dto.Category != "DecoratedGood")
+        return Results.BadRequest("Category must be RawMaterial, BakedGood, or DecoratedGood.");
+
+    using var db = new NpgsqlConnection(connectionString);
+    int rows = await db.ExecuteAsync(@"
+        UPDATE inventory
+        SET category = @Category, uom = @Uom, pack_multiplier = @PackMultiplier, last_updated = CURRENT_TIMESTAMP
+        WHERE sku = @sku",
+        new { dto.Category, dto.Uom, dto.PackMultiplier, sku });
     return rows == 0 ? Results.NotFound() : Results.Ok();
 });
 
@@ -523,9 +560,281 @@ app.MapGet("/api/inventory/adjustments", async (DateTime start, DateTime end, st
     return Results.Ok(await db.QueryAsync<InventoryAdjustmentRow>(sql, new { start, end, branch }));
 });
 
+// --- RECIPES (baking + decorating share this: a "recipe" just consumes N input SKUs
+// and produces one output SKU; a decorating recipe's inputs happen to include a
+// BakedGood). Reads are open - branches need the list to know what they can produce.
+// Only mutations are owner-gated (see IsOwnerCaller) - the owner alone maintains recipes.
+
+app.MapGet("/api/recipes", async () =>
+{
+    using var db = new NpgsqlConnection(connectionString);
+    var recipes = (await db.QueryAsync<RecipeRow>(@"
+        SELECT recipe_id AS RecipeId, name AS Name, kind AS Kind, output_sku AS OutputSku,
+               output_qty AS OutputQty, is_active AS IsActive
+        FROM recipes WHERE is_active = true ORDER BY name")).ToList();
+    var lines = (await db.QueryAsync<RecipeLineRawRow>(
+        "SELECT recipe_id AS RecipeId, input_sku AS InputSku, qty AS Qty FROM recipe_lines")).ToList();
+    foreach (var r in recipes)
+        r.Lines = lines.Where(l => l.RecipeId == r.RecipeId)
+            .Select(l => new RecipeLineDto { InputSku = l.InputSku, Qty = l.Qty }).ToList();
+    return Results.Ok(recipes);
+});
+
+app.MapGet("/api/recipes/{id}", async (int id) =>
+{
+    using var db = new NpgsqlConnection(connectionString);
+    var recipe = await db.QuerySingleOrDefaultAsync<RecipeRow>(@"
+        SELECT recipe_id AS RecipeId, name AS Name, kind AS Kind, output_sku AS OutputSku,
+               output_qty AS OutputQty, is_active AS IsActive
+        FROM recipes WHERE recipe_id = @id", new { id });
+    if (recipe == null) return Results.NotFound();
+
+    var lines = await db.QueryAsync<RecipeLineRawRow>(
+        "SELECT recipe_id AS RecipeId, input_sku AS InputSku, qty AS Qty FROM recipe_lines WHERE recipe_id = @id", new { id });
+    recipe.Lines = lines.Select(l => new RecipeLineDto { InputSku = l.InputSku, Qty = l.Qty }).ToList();
+    return Results.Ok(recipe);
+});
+
+app.MapPost("/api/recipes", async (RecipeDto dto, HttpContext http) =>
+{
+    if (!IsOwnerCaller(http)) return Results.Problem("This endpoint is restricted to the owner.", statusCode: 403);
+    if (dto.Lines == null || dto.Lines.Count == 0) return Results.BadRequest("A recipe needs at least one input line.");
+
+    using var db = new NpgsqlConnection(connectionString);
+    await db.OpenAsync();
+    using var tx = await db.BeginTransactionAsync();
+    try
+    {
+        int recipeId = await db.ExecuteScalarAsync<int>(@"
+            INSERT INTO recipes (name, kind, output_sku, output_qty)
+            VALUES (@Name, @Kind, @OutputSku, @OutputQty) RETURNING recipe_id",
+            new { dto.Name, dto.Kind, dto.OutputSku, dto.OutputQty }, tx);
+
+        foreach (var line in dto.Lines)
+            await db.ExecuteAsync(
+                "INSERT INTO recipe_lines (recipe_id, input_sku, qty) VALUES (@recipeId, @InputSku, @Qty)",
+                new { recipeId, line.InputSku, line.Qty }, tx);
+
+        await tx.CommitAsync();
+        return Results.Ok(new { RecipeId = recipeId });
+    }
+    catch (Exception ex) { await tx.RollbackAsync(); return Results.Problem(ex.Message); }
+});
+
+app.MapPut("/api/recipes/{id}", async (int id, RecipeDto dto, HttpContext http) =>
+{
+    if (!IsOwnerCaller(http)) return Results.Problem("This endpoint is restricted to the owner.", statusCode: 403);
+    if (dto.Lines == null || dto.Lines.Count == 0) return Results.BadRequest("A recipe needs at least one input line.");
+
+    using var db = new NpgsqlConnection(connectionString);
+    await db.OpenAsync();
+    using var tx = await db.BeginTransactionAsync();
+    try
+    {
+        int rows = await db.ExecuteAsync(@"
+            UPDATE recipes SET name = @Name, kind = @Kind, output_sku = @OutputSku, output_qty = @OutputQty
+            WHERE recipe_id = @id", new { id, dto.Name, dto.Kind, dto.OutputSku, dto.OutputQty }, tx);
+        if (rows == 0) { await tx.RollbackAsync(); return Results.NotFound(); }
+
+        await db.ExecuteAsync("DELETE FROM recipe_lines WHERE recipe_id = @id", new { id }, tx);
+        foreach (var line in dto.Lines)
+            await db.ExecuteAsync(
+                "INSERT INTO recipe_lines (recipe_id, input_sku, qty) VALUES (@id, @InputSku, @Qty)",
+                new { id, line.InputSku, line.Qty }, tx);
+
+        await tx.CommitAsync();
+        return Results.Ok();
+    }
+    catch (Exception ex) { await tx.RollbackAsync(); return Results.Problem(ex.Message); }
+});
+
+app.MapPatch("/api/recipes/{id}/deactivate", async (int id, HttpContext http) =>
+{
+    if (!IsOwnerCaller(http)) return Results.Problem("This endpoint is restricted to the owner.", statusCode: 403);
+    using var db = new NpgsqlConnection(connectionString);
+    int rows = await db.ExecuteAsync("UPDATE recipes SET is_active = false WHERE recipe_id = @id", new { id });
+    return rows == 0 ? Results.NotFound() : Results.Ok();
+});
+
+// --- PRODUCTION (baking + decorating batches) ---
+// Deliberately NOT IP-gated yet: branch PCs aren't on Tailscale, so this is open
+// like /api/deliveries/{id}/accept. TODO: bind to a per-branch IP once known.
+
+app.MapPost("/api/production", async (ProductionDto dto) =>
+{
+    if (string.IsNullOrWhiteSpace(dto.Branch)) return Results.BadRequest("Branch is required.");
+    if (string.IsNullOrWhiteSpace(dto.StaffName)) return Results.BadRequest("StaffName is required.");
+
+    using var db = new NpgsqlConnection(connectionString);
+    await db.OpenAsync();
+    using var tx = await db.BeginTransactionAsync();
+    try
+    {
+        // Same per-branch serialization as every other FIFO writer (accept/adjust/deliver).
+        await db.ExecuteAsync("SELECT pg_advisory_xact_lock(hashtext('inventory-write:' || @Branch))", new { dto.Branch }, tx);
+
+        var recipe = await db.QuerySingleOrDefaultAsync<RecipeRow>(@"
+            SELECT recipe_id AS RecipeId, name AS Name, kind AS Kind, output_sku AS OutputSku,
+                   output_qty AS OutputQty, is_active AS IsActive
+            FROM recipes WHERE recipe_id = @RecipeId", new { dto.RecipeId }, tx);
+        if (recipe == null) { await tx.RollbackAsync(); return Results.NotFound($"No recipe {dto.RecipeId}."); }
+
+        var lines = (await db.QueryAsync<RecipeLineRawRow>(
+            "SELECT recipe_id AS RecipeId, input_sku AS InputSku, qty AS Qty FROM recipe_lines WHERE recipe_id = @RecipeId",
+            new { dto.RecipeId }, tx)).ToList();
+        if (lines.Count == 0) { await tx.RollbackAsync(); return Results.BadRequest("Recipe has no input lines."); }
+
+        decimal totalInputCost = 0;
+        var consumedRows = new List<(string Sku, int Qty, decimal Cost)>();
+
+        foreach (var line in lines)
+        {
+            // Rounds up so a fractional multiplier never under-consumes an ingredient.
+            int qtyNeeded = (int)Math.Ceiling(line.Qty * dto.BatchMultiplier);
+
+            var lots = await db.QueryAsync<LotRow>(@"
+                SELECT lot_id AS LotId, remaining_qty AS RemainingQty, unit_cost AS UnitCost
+                FROM inventory_lots
+                WHERE sku = @sku AND remaining_qty > 0 AND branch_name = @Branch
+                ORDER BY date_received ASC, lot_id ASC
+                FOR UPDATE", new { sku = line.InputSku, dto.Branch }, tx);
+
+            int remaining = qtyNeeded;
+            decimal lineCost = 0;
+            foreach (var lot in lots)
+            {
+                if (remaining <= 0) break;
+                int take = Math.Min(remaining, lot.RemainingQty);
+                remaining -= take;
+                lineCost += take * lot.UnitCost;
+
+                await db.ExecuteAsync(
+                    "UPDATE inventory_lots SET remaining_qty = remaining_qty - @Take WHERE lot_id = @LotId AND branch_name = @Branch",
+                    new { Take = take, lot.LotId, dto.Branch }, tx);
+            }
+
+            if (remaining > 0)
+                throw new Exception($"Insufficient stock for {line.InputSku}. Short by {remaining}.");
+
+            totalInputCost += lineCost;
+            consumedRows.Add((line.InputSku, qtyNeeded, lineCost));
+        }
+
+        // OutputQty lets the baker record actual yield (a burnt tray, etc.); 0 means
+        // "use the recipe's default yield scaled by the multiplier".
+        int outputQty = dto.OutputQty > 0 ? dto.OutputQty : (int)Math.Round(recipe.OutputQty * dto.BatchMultiplier);
+        decimal outputUnitCost = outputQty > 0 ? totalInputCost / outputQty : 0;
+
+        int nextLotId = await db.ExecuteScalarAsync<int>(
+            "SELECT COALESCE(MAX(lot_id), 0) FROM inventory_lots WHERE branch_name = @Branch", new { dto.Branch }, tx) + 1;
+
+        await db.ExecuteAsync(@"
+            INSERT INTO inventory_lots (branch_name, lot_id, sku, date_received, original_qty, remaining_qty, unit_cost)
+            VALUES (@Branch, @LotId, @OutputSku, CURRENT_TIMESTAMP, @OutputQty, @OutputQty, @UnitCost)",
+            new { dto.Branch, LotId = nextLotId, recipe.OutputSku, OutputQty = outputQty, UnitCost = outputUnitCost }, tx);
+
+        int nextLocalId = await db.ExecuteScalarAsync<int>(
+            "SELECT COALESCE(MAX(local_id), 0) FROM production_batches WHERE branch_name = @Branch", new { dto.Branch }, tx) + 1;
+
+        await db.ExecuteAsync(@"
+            INSERT INTO production_batches (branch_name, local_id, transaction_id, recipe_id, staff_name, batch_multiplier, output_sku, output_qty, total_input_cost)
+            VALUES (@Branch, @LocalId, @TransactionId, @RecipeId, @StaffName, @BatchMultiplier, @OutputSku, @OutputQty, @TotalInputCost)",
+            new { dto.Branch, LocalId = nextLocalId, dto.TransactionId, dto.RecipeId, dto.StaffName, dto.BatchMultiplier,
+                  recipe.OutputSku, OutputQty = outputQty, TotalInputCost = totalInputCost }, tx);
+
+        foreach (var c in consumedRows)
+            await db.ExecuteAsync(@"
+                INSERT INTO production_consumed (branch_name, production_local_id, transaction_id, input_sku, qty, cost)
+                VALUES (@Branch, @LocalId, @TransactionId, @Sku, @Qty, @Cost)",
+                new { dto.Branch, LocalId = nextLocalId, dto.TransactionId, c.Sku, c.Qty, c.Cost }, tx);
+
+        await tx.CommitAsync();
+        return Results.Ok(new { OutputSku = recipe.OutputSku, OutputQty = outputQty, TotalInputCost = totalInputCost });
+    }
+    catch (Exception ex) { await tx.RollbackAsync(); return Results.Problem(ex.Message); }
+});
+
+app.MapGet("/api/production", async (string branch, DateTime? start, DateTime? end) =>
+{
+    using var db = new NpgsqlConnection(connectionString);
+    var sql = @"
+        SELECT p.transaction_id AS TransactionId, p.date AS Date, p.recipe_id AS RecipeId, r.name AS RecipeName,
+               p.staff_name AS StaffName, p.batch_multiplier AS BatchMultiplier, p.output_sku AS OutputSku,
+               p.output_qty AS OutputQty, p.total_input_cost AS TotalInputCost
+        FROM production_batches p LEFT JOIN recipes r ON p.recipe_id = r.recipe_id
+        WHERE p.branch_name = @branch
+          AND (@start::timestamp IS NULL OR p.date >= @start::timestamp)
+          AND (@end::timestamp IS NULL OR p.date <= @end::timestamp)
+        ORDER BY p.date DESC";
+    return Results.Ok(await db.QueryAsync<ProductionBatchRow>(sql, new { branch, start, end }));
+});
+
 app.Run();
 
 // DTO Schemas matching the SQLite structures
+
+public class ClassifyInventoryDto
+{
+    public string Category { get; set; } = "RawMaterial";
+    public string? Uom { get; set; }
+    public decimal PackMultiplier { get; set; } = 1.0m;
+}
+
+public class RecipeLineDto
+{
+    public string InputSku { get; set; } = string.Empty;
+    public int Qty { get; set; }
+}
+
+public class RecipeLineRawRow
+{
+    public int RecipeId { get; set; }
+    public string InputSku { get; set; } = string.Empty;
+    public int Qty { get; set; }
+}
+
+public class RecipeDto
+{
+    public string Name { get; set; } = string.Empty;
+    public string Kind { get; set; } = string.Empty; // "Baking" or "Decorating"
+    public string OutputSku { get; set; } = string.Empty;
+    public int OutputQty { get; set; }
+    public List<RecipeLineDto> Lines { get; set; } = new();
+}
+
+public class RecipeRow
+{
+    public int RecipeId { get; set; }
+    public string Name { get; set; } = string.Empty;
+    public string Kind { get; set; } = string.Empty;
+    public string OutputSku { get; set; } = string.Empty;
+    public int OutputQty { get; set; }
+    public bool IsActive { get; set; }
+    public List<RecipeLineDto> Lines { get; set; } = new();
+}
+
+public class ProductionDto
+{
+    public string Branch { get; set; } = string.Empty;
+    public int RecipeId { get; set; }
+    public string StaffName { get; set; } = string.Empty;
+    public decimal BatchMultiplier { get; set; } = 1;
+    public int OutputQty { get; set; } // 0 = use the recipe's default yield * BatchMultiplier
+    public string TransactionId { get; set; } = string.Empty;
+}
+
+public class ProductionBatchRow
+{
+    public string TransactionId { get; set; } = string.Empty;
+    public DateTime Date { get; set; }
+    public int RecipeId { get; set; }
+    public string RecipeName { get; set; } = string.Empty;
+    public string StaffName { get; set; } = string.Empty;
+    public decimal BatchMultiplier { get; set; }
+    public string OutputSku { get; set; } = string.Empty;
+    public int OutputQty { get; set; }
+    public decimal TotalInputCost { get; set; }
+}
 
 public class InventoryItemDto
 {
