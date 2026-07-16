@@ -15,11 +15,32 @@ var connectionString = builder.Configuration.GetConnectionString("DefaultConnect
 
 var app = builder.Build();
 
+// Office/owner IP allowlist. Tailscale assigns each device on the tailnet a stable 100.x
+// address, so checking the caller's remote IP is a real server-side restriction rather than
+// trusting whoever has a copy of the client exe. Only two entries exist today - there's no
+// branches table or auth system yet, so per-branch entries get added here once each branch
+// PC joins Tailscale (branch-initiated endpoints like /accept aren't gated yet for that reason).
+var trustedOfficeIps = new HashSet<string>
+{
+    "100.66.61.24",  // SKC Bakery Supplies office PC
+    "100.108.218.24" // Owner's laptop
+};
+
+bool IsTrustedOfficeCaller(HttpContext http)
+{
+    var ip = http.Connection.RemoteIpAddress;
+    if (ip == null) return false;
+    if (ip.IsIPv4MappedToIPv6) ip = ip.MapToIPv4();
+    return trustedOfficeIps.Contains(ip.ToString());
+}
+
 // Endpoints
 app.MapGet("/health", () => Results.Ok(new { Status = "Healthy" }));
 
-app.MapPost("/api/purchases", async (List<PurchaseLogDto> purchases) =>
+app.MapPost("/api/purchases", async (List<PurchaseLogDto> purchases, HttpContext http) =>
 {
+    if (!IsTrustedOfficeCaller(http)) return Results.Problem("This endpoint is restricted to trusted office devices.", statusCode: 403);
+
     using var db = new NpgsqlConnection(connectionString);
     await db.OpenAsync();
     using var transaction = await db.BeginTransactionAsync();
@@ -58,8 +79,10 @@ app.MapPost("/api/purchases", async (List<PurchaseLogDto> purchases) =>
         return Results.Problem(ex.Message);
     }
 });
-app.MapPost("/api/deliveries", async (List<DeliveryLogDto> deliveries) =>
+app.MapPost("/api/deliveries", async (List<DeliveryLogDto> deliveries, HttpContext http) =>
 {
+    if (!IsTrustedOfficeCaller(http)) return Results.Problem("This endpoint is restricted to trusted office devices.", statusCode: 403);
+
     using var db = new NpgsqlConnection(connectionString);
     await db.OpenAsync();
     using var transaction = await db.BeginTransactionAsync();
@@ -157,7 +180,9 @@ app.MapGet("/api/purchases/{id}", async (string id) => {
     return Results.Ok(await db.QueryAsync<PurchaseLog>("SELECT transaction_id AS TransactionId, date AS Date, sku AS SKU, qty AS Qty, unit_cost AS UnitCost, supplier AS Supplier FROM purchase_logs WHERE transaction_id = @id", new { id }));
 });
 
-app.MapDelete("/api/purchases/{id}", async (string id) => {
+app.MapDelete("/api/purchases/{id}", async (string id, HttpContext http) => {
+    if (!IsTrustedOfficeCaller(http)) return Results.Problem("This endpoint is restricted to trusted office devices.", statusCode: 403);
+
     using var db = new NpgsqlConnection(connectionString);
     await db.OpenAsync();
     using var tx = await db.BeginTransactionAsync();
@@ -197,7 +222,9 @@ app.MapGet("/api/deliveries/{id}", async (string id) => {
     return Results.Ok(await db.QueryAsync<DeliveryLog>("SELECT transaction_id AS TransactionId, date AS Date, sku AS SKU, qty AS Qty, to_branch AS ToBranch, total_line_cost AS TotalLineCost, requester AS Requester, reason AS Reason FROM delivery_logs WHERE transaction_id = @id", new { id }));
 });
 
-app.MapDelete("/api/deliveries/{id}", async (string id) => {
+app.MapDelete("/api/deliveries/{id}", async (string id, HttpContext http) => {
+    if (!IsTrustedOfficeCaller(http)) return Results.Problem("This endpoint is restricted to trusted office devices.", statusCode: 403);
+
     using var db = new NpgsqlConnection(connectionString);
     await db.OpenAsync();
     using var tx = await db.BeginTransactionAsync();
@@ -341,8 +368,10 @@ app.MapGet("/api/inventory/branch/{branch}", async (string branch) =>
     return Results.Ok(products);
 });
 
-app.MapPost("/api/inventory", async (InventoryItemDto product) =>
+app.MapPost("/api/inventory", async (InventoryItemDto product, HttpContext http) =>
 {
+    if (!IsTrustedOfficeCaller(http)) return Results.Problem("This endpoint is restricted to trusted office devices.", statusCode: 403);
+
     using var db = new NpgsqlConnection(connectionString);
     try
     {
@@ -361,8 +390,10 @@ app.MapPost("/api/inventory", async (InventoryItemDto product) =>
     }
 });
 
-app.MapPut("/api/inventory/{sku}", async (string sku, UpdateProductDto dto) =>
+app.MapPut("/api/inventory/{sku}", async (string sku, UpdateProductDto dto, HttpContext http) =>
 {
+    if (!IsTrustedOfficeCaller(http)) return Results.Problem("This endpoint is restricted to trusted office devices.", statusCode: 403);
+
     using var db = new NpgsqlConnection(connectionString);
     int rows = await db.ExecuteAsync(
         "UPDATE inventory SET brand = @Brand, base_name = @BaseName, last_updated = CURRENT_TIMESTAMP WHERE sku = @sku",
@@ -370,8 +401,10 @@ app.MapPut("/api/inventory/{sku}", async (string sku, UpdateProductDto dto) =>
     return rows == 0 ? Results.NotFound() : Results.Ok();
 });
 
-app.MapPatch("/api/inventory/{sku}/deactivate", async (string sku) =>
+app.MapPatch("/api/inventory/{sku}/deactivate", async (string sku, HttpContext http) =>
 {
+    if (!IsTrustedOfficeCaller(http)) return Results.Problem("This endpoint is restricted to trusted office devices.", statusCode: 403);
+
     using var db = new NpgsqlConnection(connectionString);
     int rows = await db.ExecuteAsync(
         "UPDATE inventory SET is_active = false, last_updated = CURRENT_TIMESTAMP WHERE sku = @sku", new { sku });
@@ -381,8 +414,10 @@ app.MapPatch("/api/inventory/{sku}/deactivate", async (string sku) =>
 // Reconciles a branch's stock with a physical count. Used when a manual inventory
 // count (see the client's "print all inventory" count sheet) finds a discrepancy.
 // Branch defaults to 'Office' (central stock) but can target any branch's own lots.
-app.MapPost("/api/inventory/{sku}/adjust", async (string sku, AdjustInventoryDto dto) =>
+app.MapPost("/api/inventory/{sku}/adjust", async (string sku, AdjustInventoryDto dto, HttpContext http) =>
 {
+    if (!IsTrustedOfficeCaller(http)) return Results.Problem("This endpoint is restricted to trusted office devices.", statusCode: 403);
+
     string branch = string.IsNullOrWhiteSpace(dto.Branch) ? "Office" : dto.Branch;
 
     using var db = new NpgsqlConnection(connectionString);
