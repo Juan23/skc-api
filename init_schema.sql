@@ -173,6 +173,9 @@ CREATE TABLE IF NOT EXISTS pos_sales (
     staff_name VARCHAR(100) NOT NULL,
     sold_at TIMESTAMP WITHOUT TIME ZONE NOT NULL,   -- counter time, not sync time (offline sales sync late)
     total_amount NUMERIC(18, 2) NOT NULL,
+    voided BOOLEAN NOT NULL DEFAULT FALSE,          -- a voided sale is restocked and flagged, never deleted
+    voided_at TIMESTAMP WITHOUT TIME ZONE,
+    voided_by VARCHAR(100),
     created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT uq_branch_pos_sale UNIQUE (branch_name, client_sale_id)

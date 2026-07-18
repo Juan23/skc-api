@@ -81,6 +81,20 @@ app.MapPost("/api/purchases", async (List<PurchaseLogDto> purchases, HttpContext
         // Serialize concurrent writers on this branch so the MAX()+1 ID assignment below can't race.
         await db.ExecuteAsync("SELECT pg_advisory_xact_lock(hashtext('inventory-write:Office'))", transaction: transaction);
 
+        // Idempotency: if this ticket's transaction_id already committed (the client re-submitted
+        // after a lost response), don't create the lots/logs a second time. All lines of one submit
+        // share a single client-minted transaction_id.
+        if (purchases.Count > 0)
+        {
+            var txId = purchases[0].TransactionId;
+            if (!string.IsNullOrWhiteSpace(txId))
+            {
+                int existing = await db.ExecuteScalarAsync<int>(
+                    "SELECT COUNT(*) FROM purchase_logs WHERE transaction_id = @txId", new { txId }, transaction);
+                if (existing > 0) { await transaction.CommitAsync(); return Results.Ok(); }
+            }
+        }
+
         // 1. Grab the highest existing IDs to simulate auto-increment
         int nextPurchaseId = await db.ExecuteScalarAsync<int>("SELECT COALESCE(MAX(local_id), 0) FROM purchase_logs WHERE branch_name = 'Office'", transaction);
         int nextLotId = await db.ExecuteScalarAsync<int>("SELECT COALESCE(MAX(lot_id), 0) FROM inventory_lots WHERE branch_name = 'Office'", transaction);
@@ -126,6 +140,22 @@ app.MapPost("/api/deliveries", async (List<DeliveryLogDto> deliveries, HttpConte
         // and also stops two concurrent deliveries from both reading the same lot's remaining_qty
         // before either commits (see the FOR UPDATE on the lot query below for the same reason).
         await db.ExecuteAsync("SELECT pg_advisory_xact_lock(hashtext('inventory-write:Office'))", transaction: transaction);
+
+        // Idempotency: a re-submit of the same transaction_id (client didn't hear back after a
+        // committed request) returns the already-recorded rows for printing instead of deducting
+        // Office stock and inserting the ticket a second time. All lines share one transaction_id.
+        if (deliveries.Count > 0)
+        {
+            var txId = deliveries[0].TransactionId;
+            if (!string.IsNullOrWhiteSpace(txId))
+            {
+                var existing = (await db.QueryAsync<DeliveryLog>(
+                    @"SELECT transaction_id AS TransactionId, date AS Date, sku AS SKU, qty AS Qty, to_branch AS ToBranch,
+                             total_line_cost AS TotalLineCost, requester AS Requester, reason AS Reason
+                      FROM delivery_logs WHERE transaction_id = @txId", new { txId }, transaction)).ToList();
+                if (existing.Count > 0) { await transaction.CommitAsync(); return Results.Ok(existing); }
+            }
+        }
 
         int nextDeliveryId = await db.ExecuteScalarAsync<int>("SELECT COALESCE(MAX(local_id), 0) FROM delivery_logs WHERE branch_name = 'Office'", transaction);
         var insertedRows = new List<DeliveryLog>();
@@ -243,10 +273,14 @@ app.MapDelete("/api/purchases/{id}", async (string id, HttpContext http) => {
 
 app.MapGet("/api/deliveries/tickets", async (DateTime start, DateTime end) => {
     using var db = new NpgsqlConnection(connectionString);
+    // Compare on ::date, not the raw timestamp: delivery_logs.date carries a time component
+    // (Delivery.cs stamps DateTime.Now), so a plain `date <= @end` with a date-only end (midnight)
+    // silently drops every same-day delivery. Casting both sides to date makes the range whole-day
+    // inclusive regardless of what time the client sends - same idea as /api/deliveries/daily's date().
     var sql = @"SELECT transaction_id AS TransactionId, date AS Date, to_branch AS ToBranch, SUM(qty) AS TotalItems,
                        MAX(requester) AS Requester, MAX(reason) AS Reason, SUM(total_line_cost) AS TotalCost,
                        MIN(status) AS Status
-                FROM delivery_logs WHERE date >= @start AND date <= @end GROUP BY transaction_id, date, to_branch ORDER BY date DESC";
+                FROM delivery_logs WHERE date::date >= @start::date AND date::date <= @end::date GROUP BY transaction_id, date, to_branch ORDER BY date DESC";
     return Results.Ok(await db.QueryAsync<DeliveryTicketSummary>(sql, new { start, end }));
 });
 
@@ -410,6 +444,13 @@ app.MapGet("/api/inventory/branch/{branch}", async (string branch) =>
 app.MapPost("/api/inventory", async (InventoryItemDto product, HttpContext http) =>
 {
     if (!IsTrustedOfficeCaller(http)) return Results.Problem("This endpoint is restricted to trusted office devices.", statusCode: 403);
+
+    // Validate up front like every other write - the UI guards these today, but the endpoint
+    // shouldn't rely on that (a blank SKU would hit the PK, a negative price is just bad data).
+    if (string.IsNullOrWhiteSpace(product.SKU) || string.IsNullOrWhiteSpace(product.BaseName))
+        return Results.BadRequest("SKU and BaseName are required.");
+    if (product.Price < 0)
+        return Results.BadRequest("Price cannot be negative.");
 
     using var db = new NpgsqlConnection(connectionString);
     try
@@ -600,7 +641,7 @@ app.MapGet("/api/inventory/adjustments", async (DateTime start, DateTime end, st
         SELECT a.date AS Date, a.sku AS SKU, i.brand AS Brand, i.base_name AS BaseName,
                a.qty_delta AS QtyDelta, a.unit_cost AS UnitCost, a.reason AS Reason, a.branch_name AS Branch
         FROM inventory_adjustments a LEFT JOIN inventory i ON a.sku = i.sku
-        WHERE a.date >= @start AND a.date <= @end
+        WHERE a.date::date >= @start::date AND a.date::date <= @end::date
           AND (@branch IS NULL OR a.branch_name = @branch)
         ORDER BY a.date DESC";
     return Results.Ok(await db.QueryAsync<InventoryAdjustmentRow>(sql, new { start, end, branch }));
@@ -714,6 +755,9 @@ app.MapPost("/api/production", async (ProductionDto dto) =>
 {
     if (string.IsNullOrWhiteSpace(dto.Branch)) return Results.BadRequest("Branch is required.");
     if (string.IsNullOrWhiteSpace(dto.StaffName)) return Results.BadRequest("StaffName is required.");
+    // Required so the dedup guard below can make a re-submit idempotent (the client mints one
+    // PRD-... id per batch and reuses it across a retry after a lost response).
+    if (string.IsNullOrWhiteSpace(dto.TransactionId)) return Results.BadRequest("TransactionId is required.");
     // BatchMultiplier <= 0 used to sail through as a silent no-op batch (0 consumed, 0 credited,
     // still recorded); a negative multiplier was only ever caught incidentally by the
     // chk_remaining_qty_non_negative constraint on inventory_lots, surfacing a raw Postgres
@@ -728,6 +772,19 @@ app.MapPost("/api/production", async (ProductionDto dto) =>
     {
         // Same per-branch serialization as every other FIFO writer (accept/adjust/deliver).
         await db.ExecuteAsync("SELECT pg_advisory_xact_lock(hashtext('inventory-write:' || @Branch))", new { dto.Branch }, tx);
+
+        // Idempotency: if this transaction_id already produced a batch for this branch, a prior
+        // submit committed and the client just didn't hear back. Return the existing result rather
+        // than FIFO-consuming inputs and crediting output a second time.
+        var existingBatch = await db.QuerySingleOrDefaultAsync<ProductionBatchRow>(@"
+            SELECT output_sku AS OutputSku, output_qty AS OutputQty, total_input_cost AS TotalInputCost
+            FROM production_batches WHERE branch_name = @Branch AND transaction_id = @TransactionId",
+            new { dto.Branch, dto.TransactionId }, tx);
+        if (existingBatch != null)
+        {
+            await tx.CommitAsync();
+            return Results.Ok(new { existingBatch.OutputSku, existingBatch.OutputQty, existingBatch.TotalInputCost });
+        }
 
         var recipe = await db.QuerySingleOrDefaultAsync<RecipeRow>(@"
             SELECT recipe_id AS RecipeId, name AS Name, kind AS Kind, output_sku AS OutputSku,
@@ -848,7 +905,7 @@ app.MapPost("/api/sales", async (List<PosSaleDto> sales) =>
         if (string.IsNullOrWhiteSpace(sale.ClientSaleId)) invalid = "ClientSaleId is required.";
         else if (string.IsNullOrWhiteSpace(sale.Branch)) invalid = "Branch is required.";
         else if (string.IsNullOrWhiteSpace(sale.StaffName)) invalid = "StaffName is required.";
-        else if (sale.Lines.Count == 0) invalid = "A sale needs at least one line.";
+        else if (sale.Lines == null || sale.Lines.Count == 0) invalid = "A sale needs at least one line.";
         else if (sale.TotalAmount < 0) invalid = "Sale total cannot be negative.";
         else if (sale.Lines.Any(l => l.SKU != null && l.Qty <= 0)) invalid = "Product line Qty must be greater than zero.";
         else if (sale.Lines.Any(l => l.SKU == null && l.LineTotal > 0)) invalid = "Discount lines (no SKU) cannot be positive.";
@@ -970,7 +1027,7 @@ app.MapGet("/api/sales", async (string branch, DateTime start, DateTime end) =>
     using var db = new NpgsqlConnection(connectionString);
     var sql = @"
         SELECT s.local_id AS LocalId, s.client_sale_id AS ClientSaleId, s.staff_name AS StaffName,
-               s.sold_at AS SoldAt, s.total_amount AS TotalAmount,
+               s.sold_at AS SoldAt, s.total_amount AS TotalAmount, s.voided AS Voided,
                COALESCE((SELECT SUM(l.shortfall_qty) FROM pos_sale_lines l
                          WHERE l.branch_name = s.branch_name AND l.client_sale_id = s.client_sale_id), 0) > 0 AS HasShortfall
         FROM pos_sales s
@@ -989,6 +1046,67 @@ app.MapGet("/api/sales/{branch}/{clientSaleId}", async (string branch, string cl
         WHERE branch_name = @branch AND client_sale_id = @clientSaleId
         ORDER BY id ASC", new { branch, clientSaleId })).ToList();
     return lines.Count == 0 ? Results.NotFound() : Results.Ok(lines);
+});
+
+// Void a completed sale. Reverses its inventory effect by restocking exactly what FIFO actually
+// consumed (qty - shortfall_qty, valued at the recorded consumed_cost) and flags the sale as voided.
+// Idempotent: re-voiding is a harmless no-op, so a retry after a lost response is safe. Online-only
+// - the sale must have synced first (same connectivity posture as accept/production). Discount lines
+// (sku NULL) and fully-shortfall lines restock nothing. Not IP-gated, like the other branch writes.
+app.MapPost("/api/sales/{branch}/{clientSaleId}/void", async (string branch, string clientSaleId, VoidSaleDto dto) =>
+{
+    if (string.IsNullOrWhiteSpace(dto.VoidedBy)) return Results.BadRequest("VoidedBy is required.");
+
+    using var db = new NpgsqlConnection(connectionString);
+    await db.OpenAsync();
+    using var tx = await db.BeginTransactionAsync();
+    try
+    {
+        // Serialize with every other FIFO writer on this branch before touching lot ids.
+        await db.ExecuteAsync("SELECT pg_advisory_xact_lock(hashtext('inventory-write:' || @branch))", new { branch }, tx);
+
+        // Lock the sale header so two concurrent voids serialize instead of both restocking.
+        var sale = await db.QuerySingleOrDefaultAsync(
+            "SELECT voided FROM pos_sales WHERE branch_name = @branch AND client_sale_id = @clientSaleId FOR UPDATE",
+            new { branch, clientSaleId }, tx);
+        if (sale == null) { await tx.RollbackAsync(); return Results.NotFound($"No sale {clientSaleId} for {branch}."); }
+        if ((bool)sale.voided)
+        {
+            await tx.CommitAsync();
+            return Results.Ok(new { Status = "AlreadyVoided" });
+        }
+
+        // Raw column names (no aliases) so the dynamic overload's case-sensitive member lookup
+        // matches Postgres's lowercase columns - same idiom as DELETE /api/deliveries.
+        var saleLines = await db.QueryAsync(
+            "SELECT sku, qty, shortfall_qty, consumed_cost FROM pos_sale_lines WHERE branch_name = @branch AND client_sale_id = @clientSaleId",
+            new { branch, clientSaleId }, tx);
+
+        int nextLotId = await db.ExecuteScalarAsync<int>(
+            "SELECT COALESCE(MAX(lot_id), 0) FROM inventory_lots WHERE branch_name = @branch", new { branch }, tx);
+
+        foreach (var line in saleLines)
+        {
+            if (line.sku == null) continue;                          // discount line - no inventory effect
+            int consumedQty = (int)line.qty - (int)line.shortfall_qty; // what FIFO actually deducted
+            if (consumedQty <= 0) continue;                          // fully shortfall - nothing to return
+            decimal unitCost = (decimal)line.consumed_cost / consumedQty;
+            nextLotId++;
+            await db.ExecuteAsync(@"
+                INSERT INTO inventory_lots (branch_name, lot_id, sku, date_received, original_qty, remaining_qty, unit_cost)
+                VALUES (@branch, @LotId, @sku, CURRENT_TIMESTAMP, @Qty, @Qty, @UnitCost)",
+                new { branch, LotId = nextLotId, sku = (string)line.sku, Qty = consumedQty, UnitCost = unitCost }, tx);
+        }
+
+        await db.ExecuteAsync(@"
+            UPDATE pos_sales SET voided = TRUE, voided_at = CURRENT_TIMESTAMP, voided_by = @VoidedBy
+            WHERE branch_name = @branch AND client_sale_id = @clientSaleId",
+            new { dto.VoidedBy, branch, clientSaleId }, tx);
+
+        await tx.CommitAsync();
+        return Results.Ok(new { Status = "Voided" });
+    }
+    catch (Exception ex) { await tx.RollbackAsync(); return Results.Problem(ex.Message); }
 });
 
 app.Run();
@@ -1106,6 +1224,12 @@ public class PosSaleSummaryRow
     public DateTime SoldAt { get; set; }
     public decimal TotalAmount { get; set; }
     public bool HasShortfall { get; set; }
+    public bool Voided { get; set; }
+}
+
+public class VoidSaleDto
+{
+    public string VoidedBy { get; set; } = string.Empty;
 }
 
 public class PosSaleLineRow
