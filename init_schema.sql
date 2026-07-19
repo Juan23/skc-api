@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS inventory (
     category VARCHAR(20) NOT NULL DEFAULT 'RawMaterial',
     last_updated TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
 
-    CONSTRAINT chk_inventory_category CHECK (category IN ('RawMaterial', 'BakedGood', 'DecoratedGood'))
+    CONSTRAINT chk_inventory_category CHECK (category IN ('RawMaterial', 'BakedGood', 'DecoratedGood', 'Miscellaneous'))
 );
 
 -- Index for scanning SKU lookups

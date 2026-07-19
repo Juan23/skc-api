@@ -497,8 +497,8 @@ app.MapPut("/api/inventory/{sku}/classification", async (string sku, ClassifyInv
 {
     if (!IsTrustedOfficeCaller(http)) return Results.Problem("This endpoint is restricted to trusted office devices.", statusCode: 403);
 
-    if (dto.Category != "RawMaterial" && dto.Category != "BakedGood" && dto.Category != "DecoratedGood")
-        return Results.BadRequest("Category must be RawMaterial, BakedGood, or DecoratedGood.");
+    if (dto.Category != "RawMaterial" && dto.Category != "BakedGood" && dto.Category != "DecoratedGood" && dto.Category != "Miscellaneous")
+        return Results.BadRequest("Category must be RawMaterial, BakedGood, DecoratedGood, or Miscellaneous.");
 
     using var db = new NpgsqlConnection(connectionString);
     int rows = await db.ExecuteAsync(@"
@@ -510,9 +510,10 @@ app.MapPut("/api/inventory/{sku}/classification", async (string sku, ClassifyInv
 });
 
 // Sets a product's selling price - the single company-wide price list the POS sells at.
-// Sellable = price > 0: category can't determine sellability (candles are RawMaterial by
-// taxonomy but sellable; chiffon is a BakedGood but an unsellable intermediary), so the
-// owner simply prices what's sellable and leaves raw materials/intermediaries at 0.
+// Sellable = price > 0 (chiffon, e.g., is a BakedGood but an unsellable intermediary, so it
+// stays at 0), and each POS additionally narrows by category: SKC Branch excludes
+// RawMaterial, the SKC Bakery Supplies office POS sells RawMaterial + Miscellaneous only,
+// both filtered client-side per app (see each app's PosLocalStore), not here.
 // Owner-gated (like recipes): prices are managed from the SKC Admin app only, though the
 // office app's Add Item still sets an initial price at product creation.
 app.MapPut("/api/inventory/{sku}/price", async (string sku, SetPriceDto dto, HttpContext http) =>
