@@ -828,7 +828,7 @@ app.MapPost("/api/production", async (ProductionDto dto) =>
             }
 
             if (remaining > 0)
-                throw new Exception($"Insufficient stock for {line.InputSku}. Short by {remaining}.");
+                throw new InsufficientStockException($"Insufficient stock for {line.InputSku}. Short by {remaining}.");
 
             totalInputCost += lineCost;
             consumedRows.Add((line.InputSku, qtyNeeded, lineCost));
@@ -865,6 +865,7 @@ app.MapPost("/api/production", async (ProductionDto dto) =>
         await tx.CommitAsync();
         return Results.Ok(new { OutputSku = recipe.OutputSku, OutputQty = outputQty, TotalInputCost = totalInputCost });
     }
+    catch (InsufficientStockException ex) { await tx.RollbackAsync(); return Results.Conflict(ex.Message); }
     catch (Exception ex) { await tx.RollbackAsync(); return Results.Problem(ex.Message); }
 });
 
@@ -1152,6 +1153,13 @@ public class RecipeRow
     public int OutputQty { get; set; }
     public bool IsActive { get; set; }
     public List<RecipeLineDto> Lines { get; set; } = new();
+}
+
+// Thrown for a FIFO shortfall so the catch block can return a clean 409 instead of a raw 500
+// (see bug-track.md's "POST /api/production returns a raw 500..." entry).
+public class InsufficientStockException : Exception
+{
+    public InsufficientStockException(string message) : base(message) { }
 }
 
 public class ProductionDto
