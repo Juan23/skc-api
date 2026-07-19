@@ -47,6 +47,26 @@ bool IsOwnerCaller(HttpContext http)
     return ip.ToString() == OwnerIp;
 }
 
+// Per-branch IP allowlist, filled in incrementally as each branch's PCs join Tailscale (see the
+// trustedOfficeIps comment above - this is that promised parallel map). A branch with no entry
+// here is treated as not yet onboarded and stays ungated on its own writes (validation is its
+// only protection, same as before), since it may still be running Aronium instead of this system.
+// The owner's laptop is kept in every onboarded branch's set too, so it keeps working as a
+// fallback/testing device for that branch without a separate code change.
+var branchIps = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase)
+{
+    ["Yoho"] = new HashSet<string> { "100.90.222.11", "100.81.76.53", OwnerIp }
+};
+
+bool IsTrustedBranchCaller(string branch, HttpContext http)
+{
+    if (!branchIps.TryGetValue(branch, out var allowed)) return true;
+    var ip = http.Connection.RemoteIpAddress;
+    if (ip == null) return false;
+    if (ip.IsIPv4MappedToIPv6) ip = ip.MapToIPv4();
+    return allowed.Contains(ip.ToString());
+}
+
 // Shared validation for recipe create/update. Kind mirrors the DB's chk_recipe_kind
 // constraint and quantities must be positive, so a bad value gets a clean 400 instead of
 // either a raw Postgres constraint-violation message or a recipe that silently produces
@@ -362,7 +382,7 @@ app.MapGet("/api/deliveries/pending", async (string branch) => {
     return Results.Ok(await db.QueryAsync<DeliveryTicketSummary>(sql, new { branch }));
 });
 
-app.MapPost("/api/deliveries/{transactionId}/accept", async (string transactionId, AcceptDeliveryDto dto) => {
+app.MapPost("/api/deliveries/{transactionId}/accept", async (string transactionId, AcceptDeliveryDto dto, HttpContext http) => {
     if (string.IsNullOrWhiteSpace(dto.AcceptedBy)) return Results.BadRequest("AcceptedBy is required.");
 
     using var db = new NpgsqlConnection(connectionString);
@@ -380,6 +400,15 @@ app.MapPost("/api/deliveries/{transactionId}/accept", async (string transactionI
         {
             await tx.RollbackAsync();
             return Results.NotFound($"No delivery found for ticket {transactionId}.");
+        }
+        // Gated on the ticket's real to_branch (not the client-asserted dto.Branch) and checked
+        // before the mismatch error below - gating on dto.Branch would let an untrusted caller
+        // dodge the check by lying about the branch, then read the real to_branch off the
+        // mismatch error message it's trying to be denied.
+        if (!IsTrustedBranchCaller((string)rows[0].to_branch, http))
+        {
+            await tx.RollbackAsync();
+            return Results.Problem("This endpoint is restricted to trusted branch devices.", statusCode: 403);
         }
         if (rows[0].to_branch != dto.Branch)
         {
@@ -767,20 +796,24 @@ app.MapPatch("/api/recipes/{id}/deactivate", async (int id, HttpContext http) =>
 });
 
 // --- PRODUCTION (baking + decorating batches) ---
-// Deliberately NOT IP-gated yet: branch PCs aren't on Tailscale, so this is open
-// like /api/deliveries/{id}/accept. TODO: bind to a per-branch IP once known.
+// IP-gated per branchIps above, like /api/deliveries/{id}/accept - ungated for a branch not
+// yet on the allowlist.
 
-app.MapPost("/api/production", async (ProductionDto dto) =>
+app.MapPost("/api/production", async (ProductionDto dto, HttpContext http) =>
 {
     if (string.IsNullOrWhiteSpace(dto.Branch)) return Results.BadRequest("Branch is required.");
     if (string.IsNullOrWhiteSpace(dto.StaffName)) return Results.BadRequest("StaffName is required.");
+    // Gated for branches with a known Tailscale IP set (see branchIps above); a branch not yet
+    // onboarded falls through ungated, same as before.
+    if (!IsTrustedBranchCaller(dto.Branch, http)) return Results.Problem("This endpoint is restricted to trusted branch devices.", statusCode: 403);
     // Required so the dedup guard below can make a re-submit idempotent (the client mints one
     // PRD-... id per batch and reuses it across a retry after a lost response).
     if (string.IsNullOrWhiteSpace(dto.TransactionId)) return Results.BadRequest("TransactionId is required.");
     // BatchMultiplier <= 0 used to sail through as a silent no-op batch (0 consumed, 0 credited,
     // still recorded); a negative multiplier was only ever caught incidentally by the
     // chk_remaining_qty_non_negative constraint on inventory_lots, surfacing a raw Postgres
-    // error to a caller of this deliberately-un-IP-gated endpoint. Reject both cleanly up front.
+    // error. IP gating above is now this endpoint's first line of defense for onboarded branches;
+    // this validation remains the only protection for branches not yet on the allowlist.
     if (dto.BatchMultiplier <= 0) return Results.BadRequest("BatchMultiplier must be greater than zero.");
     if (dto.OutputQty < 0) return Results.BadRequest("OutputQty cannot be negative.");
 
@@ -909,9 +942,9 @@ app.MapGet("/api/production", async (string branch, DateTime? start, DateTime? e
 // A sale is NEVER rejected for insufficient stock: FIFO consumes what exists and records
 // the uncovered remainder as shortfall_qty (oversell is warn-but-allow at the counter,
 // because recording production requires connectivity and sales must not stop).
-// Deliberately not IP-gated yet, like /accept and /api/production - branch PCs aren't on
-// Tailscale; this joins the future branch_name -> ip map when they are.
-app.MapPost("/api/sales", async (List<PosSaleDto> sales) =>
+// IP-gated per-sale via branchIps above, like /accept, /api/production, and /void - ungated
+// for a branch not yet on the allowlist (branch PCs not yet on Tailscale).
+app.MapPost("/api/sales", async (List<PosSaleDto> sales, HttpContext http) =>
 {
     var results = new List<PosSaleSyncResult>();
 
@@ -924,6 +957,9 @@ app.MapPost("/api/sales", async (List<PosSaleDto> sales) =>
         string? invalid = null;
         if (string.IsNullOrWhiteSpace(sale.ClientSaleId)) invalid = "ClientSaleId is required.";
         else if (string.IsNullOrWhiteSpace(sale.Branch)) invalid = "Branch is required.";
+        // Gated per-sale (not per-batch) since each sale carries its own Branch; a branch not
+        // yet on the allowlist (see branchIps above) falls through ungated, same as before.
+        else if (!IsTrustedBranchCaller(sale.Branch, http)) invalid = "This device is not authorized to submit sales for this branch.";
         else if (string.IsNullOrWhiteSpace(sale.StaffName)) invalid = "StaffName is required.";
         else if (sale.Lines == null || sale.Lines.Count == 0) invalid = "A sale needs at least one line.";
         else if (sale.TotalAmount < 0) invalid = "Sale total cannot be negative.";
@@ -1072,10 +1108,12 @@ app.MapGet("/api/sales/{branch}/{clientSaleId}", async (string branch, string cl
 // consumed (qty - shortfall_qty, valued at the recorded consumed_cost) and flags the sale as voided.
 // Idempotent: re-voiding is a harmless no-op, so a retry after a lost response is safe. Online-only
 // - the sale must have synced first (same connectivity posture as accept/production). Discount lines
-// (sku NULL) and fully-shortfall lines restock nothing. Not IP-gated, like the other branch writes.
-app.MapPost("/api/sales/{branch}/{clientSaleId}/void", async (string branch, string clientSaleId, VoidSaleDto dto) =>
+// (sku NULL) and fully-shortfall lines restock nothing. IP-gated per branchIps above, like the
+// other branch writes - ungated for a branch not yet on the allowlist.
+app.MapPost("/api/sales/{branch}/{clientSaleId}/void", async (string branch, string clientSaleId, VoidSaleDto dto, HttpContext http) =>
 {
     if (string.IsNullOrWhiteSpace(dto.VoidedBy)) return Results.BadRequest("VoidedBy is required.");
+    if (!IsTrustedBranchCaller(branch, http)) return Results.Problem("This endpoint is restricted to trusted branch devices.", statusCode: 403);
 
     using var db = new NpgsqlConnection(connectionString);
     await db.OpenAsync();
