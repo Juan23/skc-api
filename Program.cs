@@ -251,6 +251,16 @@ app.MapDelete("/api/purchases/{id}", async (string id, HttpContext http) => {
     using var tx = await db.BeginTransactionAsync();
     try
     {
+        // Same lock every other Office-inventory writer (deliveries, office POS sales) takes before
+        // touching inventory_lots. Without it, this delete's "already consumed" check below is a
+        // plain read that can pass on a stale pre-commit snapshot while a concurrent delivery is
+        // mid-FIFO-consumption of these same lots; this delete would then only block later on the
+        // lots' row lock, and once unblocked, delete them anyway with no re-check - destroying a
+        // lot's record right after it was legitimately consumed. Taking the lock up front instead
+        // makes this delete wait for any in-flight consumer to finish before it even reads consumed
+        // qty, so the check always sees the true current state.
+        await db.ExecuteAsync("SELECT pg_advisory_xact_lock(hashtext('inventory-write:Office'))", transaction: tx);
+
         var lines = await db.QueryAsync("SELECT sku, qty, unit_cost FROM purchase_logs WHERE transaction_id = @id", new { id }, tx);
         foreach (var line in lines)
         {
@@ -300,11 +310,19 @@ app.MapDelete("/api/deliveries/{id}", async (string id, HttpContext http) => {
         // Serialize concurrent writers on this branch so the MAX()+1 lot ID assignment below can't race.
         await db.ExecuteAsync("SELECT pg_advisory_xact_lock(hashtext('inventory-write:Office'))", transaction: tx);
 
-        int acceptedRows = await db.ExecuteScalarAsync<int>(
-            "SELECT COUNT(*) FROM delivery_logs WHERE transaction_id = @id AND status = 'Accepted'", new { id }, tx);
-        if (acceptedRows > 0) throw new Exception("Cannot delete: this ticket has already been accepted by the branch.");
+        // FOR UPDATE (not a plain read) so this blocks on - and then correctly re-observes - a
+        // concurrent POST /api/deliveries/{transactionId}/accept that's mid-flight on this same
+        // ticket (accept takes a per-branch advisory lock, not this endpoint's Office one, so that
+        // lock alone doesn't serialize the two). A plain SELECT here would pass the accepted-check
+        // against a stale pre-commit snapshot, then only block later on the unconditional DELETE
+        // below with no re-check - letting a delete and an accept both succeed on the same ticket
+        // (branch credited by accept, Office restored by delete: duplicated inventory).
+        var lines = (await db.QueryAsync(
+            "SELECT sku, qty, total_line_cost, status FROM delivery_logs WHERE transaction_id = @id FOR UPDATE",
+            new { id }, tx)).ToList();
+        if (lines.Any(l => l.status != "InTransit"))
+            throw new Exception("Cannot delete: this ticket has already been accepted by the branch.");
 
-        var lines = await db.QueryAsync("SELECT sku, qty, total_line_cost FROM delivery_logs WHERE transaction_id = @id", new { id }, tx);
         int nextLotId = await db.ExecuteScalarAsync<int>("SELECT COALESCE(MAX(lot_id), 0) FROM inventory_lots WHERE branch_name = 'Office'", tx);
         foreach (var item in lines)
         {
