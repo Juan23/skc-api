@@ -323,3 +323,57 @@ table.data tr.voided td {
   background: #f8e3e3;
   color: #8c2020;
 }
+
+/* --- inline forms, editors, row actions --------------------------------- */
+
+.inline-form {
+  display: flex;
+  align-items: flex-end;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin: 14px 0 6px;
+}
+
+.editor {
+  background: var(--surface);
+  border: 1px solid var(--silver);
+  border-radius: 6px;
+  padding: 16px 18px;
+  margin-bottom: 18px;
+}
+
+.editor h2 {
+  margin-top: 0;
+}
+
+.editor h3 {
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--muted);
+  margin: 18px 0 8px;
+}
+
+.editor .toolbar {
+  margin-bottom: 10px;
+}
+
+.row-actions {
+  display: flex;
+  gap: 6px;
+}
+
+/* Table action buttons sit inside a row, so they need to be smaller than the
+   96px-ish toolbar buttons or every grid gains a wide dead column. */
+.row-actions .btn {
+  min-width: 0;
+  height: 26px;
+  padding: 0 10px;
+  font-size: 13px;
+}
+
+.notice {
+  color: #1f6640;
+  margin: 0;
+}

@@ -7,11 +7,11 @@ import { Setup } from './pages/Setup'
 import { ChangePassword } from './pages/ChangePassword'
 import { OfficeSection } from './pages/office/OfficeSection'
 import { BranchSection } from './pages/branch/BranchSection'
-import { OwnerHome } from './pages/owner/OwnerHome'
+import { OwnerSection } from './pages/owner/OwnerSection'
 
 // Signed-in landing: each role starts on its own section. The Owner lands on
 // Office, which is where the reports they actually read live (the Owner section
-// is admin - users, recipes, pricing - and arrives in phase 3).
+// is admin: users, recipes, pricing).
 function Home() {
   const { user, loading } = useAuth()
   if (loading) return <p className="muted">Loading…</p>
@@ -58,7 +58,7 @@ export function App() {
           path="/owner/*"
           element={
             <RequireRole roles={[]}>
-              <OwnerHome />
+              <OwnerSection />
             </RequireRole>
           }
         />

@@ -143,3 +143,41 @@ export interface SaleLine {
   lineTotal: number
   shortfallQty: number
 }
+
+// --- recipes (owner-managed; baking and decorating share one shape) ---
+
+export interface RecipeLine {
+  inputSku: string
+  qty: number
+}
+
+export interface Recipe {
+  recipeId: number
+  name: string
+  kind: 'Baking' | 'Decorating'
+  outputSku: string
+  outputQty: number
+  isActive: boolean
+  lines: RecipeLine[]
+}
+
+// POST/PUT body. Note there is no recipeId and no isActive: create and replace
+// both take this shape, and activation is a separate PATCH.
+export interface RecipeInput {
+  name: string
+  kind: 'Baking' | 'Decorating'
+  outputSku: string
+  outputQty: number
+  lines: RecipeLine[]
+}
+
+// --- classification ---
+
+// PUT /api/inventory/{sku}/classification writes category, uom AND
+// pack_multiplier in a single UPDATE with no COALESCE, so a partial body blanks
+// the fields it omits. Always send all three, prefilled from the current row.
+export interface ClassificationInput {
+  category: InventoryRow['category']
+  uom: string | null
+  packMultiplier: number
+}
