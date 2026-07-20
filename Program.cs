@@ -1104,6 +1104,29 @@ app.MapGet("/api/sales/{branch}/{clientSaleId}", async (string branch, string cl
     return lines.Count == 0 ? Results.NotFound() : Results.Ok(lines);
 });
 
+// Flat line-level sales over a date range - one row per item per sale, carrying its parent sale's
+// no./time/cashier/voided flag. Exists so the branch end-of-day report can export a CSV that Excel
+// can SUMIFS into a per-item breakdown: /api/sales returns sale-level rows only (no SKU or qty), so
+// without this the client would have to call the per-sale detail endpoint once per sale. No route
+// conflict with /api/sales/{branch}/{clientSaleId} - that one has three segments, this has two.
+// Voided sales are returned rather than filtered so the export can show them as reversed rather
+// than silently dropping rows the printed report accounts for.
+app.MapGet("/api/sales/lines", async (string branch, DateTime start, DateTime end) =>
+{
+    using var db = new NpgsqlConnection(connectionString);
+    var sql = @"
+        SELECT s.local_id AS SaleNo, s.client_sale_id AS ClientSaleId, s.sold_at AS SoldAt,
+               s.staff_name AS StaffName, s.voided AS Voided,
+               l.sku AS SKU, l.description AS Description, l.qty AS Qty,
+               l.unit_price AS UnitPrice, l.line_total AS LineTotal, l.shortfall_qty AS ShortfallQty
+        FROM pos_sales s
+        JOIN pos_sale_lines l
+          ON l.branch_name = s.branch_name AND l.client_sale_id = s.client_sale_id
+        WHERE s.branch_name = @branch AND s.sold_at >= @start AND s.sold_at <= @end
+        ORDER BY s.sold_at ASC, l.id ASC";
+    return Results.Ok(await db.QueryAsync<PosSaleLineExportRow>(sql, new { branch, start, end }));
+});
+
 // Void a completed sale. Reverses its inventory effect by restocking exactly what FIFO actually
 // consumed (qty - shortfall_qty, valued at the recorded consumed_cost) and flags the sale as voided.
 // Idempotent: re-voiding is a harmless no-op, so a retry after a lost response is safe. Online-only
@@ -1290,6 +1313,22 @@ public class PosSaleSummaryRow
     public decimal TotalAmount { get; set; }
     public bool HasShortfall { get; set; }
     public bool Voided { get; set; }
+}
+
+// One sale line flattened with its parent sale's identity, for the branch end-of-day CSV export.
+public class PosSaleLineExportRow
+{
+    public int SaleNo { get; set; }
+    public string ClientSaleId { get; set; } = string.Empty;
+    public DateTime SoldAt { get; set; }
+    public string StaffName { get; set; } = string.Empty;
+    public bool Voided { get; set; }
+    public string? SKU { get; set; }
+    public string Description { get; set; } = string.Empty;
+    public int Qty { get; set; }
+    public decimal UnitPrice { get; set; }
+    public decimal LineTotal { get; set; }
+    public int ShortfallQty { get; set; }
 }
 
 public class VoidSaleDto
