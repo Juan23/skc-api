@@ -6,6 +6,7 @@ import { Deliveries } from './Deliveries'
 import { AdjustmentHistory } from './AdjustmentHistory'
 import { BranchInventoryReport } from './BranchInventoryReport'
 import { BranchSalesReport } from './BranchSalesReport'
+import { ProductionReport } from './ProductionReport'
 
 // Phase 2 is read-only. The write screens (purchases entry, delivery create /
 // edit-ticket, product add/edit, adjust) arrive in phase 4 and slot in here.
@@ -15,6 +16,7 @@ const ITEMS = [
   { to: '/office/deliveries', label: 'Deliveries' },
   { to: '/office/adjustments', label: 'Adjustments' },
   { to: '/office/stock', label: 'Stock by location' },
+  { to: '/office/production', label: 'Production' },
   { to: '/office/sales', label: 'Branch sales' },
 ]
 
@@ -28,6 +30,7 @@ export function OfficeSection() {
         <Route path="deliveries" element={<Deliveries />} />
         <Route path="adjustments" element={<AdjustmentHistory />} />
         <Route path="stock" element={<BranchInventoryReport />} />
+        <Route path="production" element={<ProductionReport />} />
         <Route path="sales" element={<BranchSalesReport />} />
         <Route path="*" element={<Navigate to="/office" replace />} />
       </Routes>
