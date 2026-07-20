@@ -23,14 +23,13 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      # NOTE: unlike the db service below, this binding has no host IP, so Docker publishes
-      # it on ALL interfaces (0.0.0.0), not just the Tailscale one. This file alone does NOT
-      # restrict access to the tailnet - that protection (if any) currently lives entirely in
-      # the droplet's OS/cloud firewall, outside this repo. Verify that firewall independently;
-      # don't assume this comment or the app's IP-allowlist checks are the only gate (several
-      # endpoints, e.g. GET *, POST /api/deliveries/{id}/accept, POST /api/production, have no
-      # IP-allowlist check at all and rely entirely on that external firewall).
-      - "7290:7290"
+      # Bound to the droplet's Tailscale IP only. Do NOT change this back to a bare
+      # "7290:7290": that publishes on 0.0.0.0 and BYPASSES ufw, because Docker writes
+      # its own iptables DNAT rules ahead of the ufw chain. That combination left the API
+      # answering on the droplet's public IP (168.144.42.235:7290) until 2026-07-20 -
+      # exposing every ungated GET and the fail-open branch writes to the open internet.
+      # This binding, not the OS firewall, is what keeps the API on the tailnet.
+      - "100.84.79.35:7290:7290"
     environment:
       - ASPNETCORE_ENVIRONMENT=Production
       - ASPNETCORE_HTTP_PORTS=7290
