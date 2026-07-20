@@ -22,8 +22,9 @@ var app = builder.Build();
 // PC joins Tailscale (branch-initiated endpoints like /accept aren't gated yet for that reason).
 var trustedOfficeIps = new HashSet<string>
 {
-    "100.66.61.24",  // SKC Bakery Supplies office PC
-    "100.108.218.24" // Owner's laptop
+    "100.66.61.24",   // SKC Bakery Supplies office PC
+    "100.108.218.24", // Owner's laptop
+    "100.81.94.66"    // Owner's phone
 };
 
 bool IsTrustedOfficeCaller(HttpContext http)
@@ -37,14 +38,19 @@ bool IsTrustedOfficeCaller(HttpContext http)
 // Recipes are the owner's alone (branches never see recipe management, only the
 // finished recipe list read-only for production entry) - stricter than the
 // general office allowlist above, which also includes the office PC.
-const string OwnerIp = "100.108.218.24";
+// Both of the owner's personal devices qualify; the laptop is named separately
+// below because it (not the phone) is the one that stands in as a branch device.
+const string OwnerLaptopIp = "100.108.218.24";
+const string OwnerPhoneIp = "100.81.94.66";
+
+var ownerIps = new HashSet<string> { OwnerLaptopIp, OwnerPhoneIp };
 
 bool IsOwnerCaller(HttpContext http)
 {
     var ip = http.Connection.RemoteIpAddress;
     if (ip == null) return false;
     if (ip.IsIPv4MappedToIPv6) ip = ip.MapToIPv4();
-    return ip.ToString() == OwnerIp;
+    return ownerIps.Contains(ip.ToString());
 }
 
 // Per-branch IP allowlist, filled in incrementally as each branch's PCs join Tailscale (see the
@@ -52,10 +58,12 @@ bool IsOwnerCaller(HttpContext http)
 // here is treated as not yet onboarded and stays ungated on its own writes (validation is its
 // only protection, same as before), since it may still be running Aronium instead of this system.
 // The owner's laptop is kept in every onboarded branch's set too, so it keeps working as a
-// fallback/testing device for that branch without a separate code change.
+// fallback/testing device for that branch without a separate code change. The owner's phone is
+// deliberately NOT here: branch writes come from the WinForms POS, which a phone can't run, so
+// an entry would be dead config rather than a usable fallback.
 var branchIps = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase)
 {
-    ["Yoho"] = new HashSet<string> { "100.90.222.11", "100.81.76.53", OwnerIp }
+    ["Yoho"] = new HashSet<string> { "100.90.222.11", "100.81.76.53", OwnerLaptopIp }
 };
 
 bool IsTrustedBranchCaller(string branch, HttpContext http)
