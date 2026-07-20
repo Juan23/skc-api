@@ -700,13 +700,17 @@ app.MapGet("/api/inventory/adjustments", async (DateTime start, DateTime end, st
 // BakedGood). Reads are open - branches need the list to know what they can produce.
 // Only mutations are owner-gated (see IsOwnerCaller) - the owner alone maintains recipes.
 
-app.MapGet("/api/recipes", async () =>
+// includeInactive defaults to false, so every existing caller (SKC Branch's production screen,
+// the SKC Admin app) keeps seeing active recipes only. The Admin CLI opts in: it needs the
+// deactivated ones to offer reactivation and to refuse creating a duplicate of a retired name.
+app.MapGet("/api/recipes", async (bool? includeInactive) =>
 {
     using var db = new NpgsqlConnection(connectionString);
     var recipes = (await db.QueryAsync<RecipeRow>(@"
         SELECT recipe_id AS RecipeId, name AS Name, kind AS Kind, output_sku AS OutputSku,
                output_qty AS OutputQty, is_active AS IsActive
-        FROM recipes WHERE is_active = true ORDER BY name")).ToList();
+        FROM recipes WHERE (@includeInactive OR is_active = true) ORDER BY name",
+        new { includeInactive = includeInactive ?? false })).ToList();
     var lines = (await db.QueryAsync<RecipeLineRawRow>(
         "SELECT recipe_id AS RecipeId, input_sku AS InputSku, qty AS Qty FROM recipe_lines")).ToList();
     foreach (var r in recipes)
@@ -792,6 +796,17 @@ app.MapPatch("/api/recipes/{id}/deactivate", async (int id, HttpContext http) =>
     if (!IsOwnerCaller(http)) return Results.Problem("This endpoint is restricted to the owner.", statusCode: 403);
     using var db = new NpgsqlConnection(connectionString);
     int rows = await db.ExecuteAsync("UPDATE recipes SET is_active = false WHERE recipe_id = @id", new { id });
+    return rows == 0 ? Results.NotFound() : Results.Ok();
+});
+
+// Mirror of deactivate. Without it, deactivation is one-way and a retired recipe can only come
+// back as a new row - which is how two recipes end up sharing a name (the CLI's import then
+// can't tell which one a workbook row means).
+app.MapPatch("/api/recipes/{id}/activate", async (int id, HttpContext http) =>
+{
+    if (!IsOwnerCaller(http)) return Results.Problem("This endpoint is restricted to the owner.", statusCode: 403);
+    using var db = new NpgsqlConnection(connectionString);
+    int rows = await db.ExecuteAsync("UPDATE recipes SET is_active = true WHERE recipe_id = @id", new { id });
     return rows == 0 ? Results.NotFound() : Results.Ok();
 });
 
