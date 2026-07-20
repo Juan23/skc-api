@@ -5,6 +5,10 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>CentralApi</RootNamespace>
+    <!-- webapp/ holds the React sources (and node_modules); only its Vite build
+         output in wwwroot/ belongs to the API. Without this, dotnet build tries
+         to compile/copy the whole npm tree. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);webapp\**</DefaultItemExcludes>
   </PropertyGroup>
 
   <ItemGroup>

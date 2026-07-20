@@ -201,3 +201,35 @@ CREATE TABLE IF NOT EXISTS pos_sale_lines (
 );
 
 CREATE INDEX IF NOT EXISTS idx_pos_sale_lines_sale ON pos_sale_lines(branch_name, client_sale_id);
+
+-- 8. Webapp accounts + sessions (mirrors migrations/007_webapp_auth.sql)
+-- WinForms clients never touch these tables - they stay on the cookie-less
+-- IP-allowlist path. See 007 for the rationale on the sentinel owner hash.
+CREATE TABLE IF NOT EXISTS app_users (
+    user_id SERIAL PRIMARY KEY,
+    username VARCHAR(64) NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,                 -- PBKDF2-SHA256$iters$saltB64$hashB64
+    role VARCHAR(20) NOT NULL,
+    branch_name VARCHAR(100),                    -- required for Branch, meaningless otherwise
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    must_change_password BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT chk_app_users_role CHECK (role IN ('Owner', 'Office', 'Branch')),
+    CONSTRAINT chk_app_users_branch CHECK (role <> 'Branch' OR branch_name IS NOT NULL)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_app_users_username_lower ON app_users(LOWER(username));
+
+CREATE TABLE IF NOT EXISTS app_sessions (
+    token_hash CHAR(64) PRIMARY KEY,             -- hex SHA-256 of the raw cookie value
+    user_id INTEGER NOT NULL REFERENCES app_users(user_id) ON DELETE CASCADE,
+    created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMP WITHOUT TIME ZONE NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_app_sessions_expires ON app_sessions(expires_at);
+
+INSERT INTO app_users (username, password_hash, role)
+VALUES ('owner', '!', 'Owner')
+ON CONFLICT (username) DO NOTHING;

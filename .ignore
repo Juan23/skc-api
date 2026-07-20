@@ -8,3 +8,7 @@ appsettings.Development.json
 appsettings.Local.json
 __MACOSX/
 .DS_Store
+
+# Vite build output - built locally and scp'd to the droplet, never committed.
+wwwroot/
+webapp/node_modules/

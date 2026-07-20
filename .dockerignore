@@ -1,0 +1,8 @@
+# The image only needs the .NET sources plus the prebuilt wwwroot/. Excluding
+# webapp/ keeps node_modules out of the build context - npm never runs on the
+# 1GB droplet; the SPA is built locally and scp'd as wwwroot/.
+bin/
+obj/
+webapp/
+.git/
+.vs/

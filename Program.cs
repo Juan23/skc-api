@@ -1,7 +1,10 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Data;
 using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -27,7 +30,7 @@ var trustedOfficeIps = new HashSet<string>
     "100.81.94.66"    // Owner's phone
 };
 
-bool IsTrustedOfficeCaller(HttpContext http)
+bool IsTrustedOfficeIp(HttpContext http)
 {
     var ip = http.Connection.RemoteIpAddress;
     if (ip == null) return false;
@@ -45,7 +48,7 @@ const string OwnerPhoneIp = "100.81.94.66";
 
 var ownerIps = new HashSet<string> { OwnerLaptopIp, OwnerPhoneIp };
 
-bool IsOwnerCaller(HttpContext http)
+bool IsOwnerIp(HttpContext http)
 {
     var ip = http.Connection.RemoteIpAddress;
     if (ip == null) return false;
@@ -66,7 +69,7 @@ var branchIps = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIg
     ["Yoho"] = new HashSet<string> { "100.90.222.11", "100.81.76.53", OwnerLaptopIp }
 };
 
-bool IsTrustedBranchCaller(string branch, HttpContext http)
+bool IsTrustedBranchIp(string branch, HttpContext http)
 {
     if (!branchIps.TryGetValue(branch, out var allowed)) return true;
     var ip = http.Connection.RemoteIpAddress;
@@ -74,6 +77,132 @@ bool IsTrustedBranchCaller(string branch, HttpContext http)
     if (ip.IsIPv4MappedToIPv6) ip = ip.MapToIPv4();
     return allowed.Contains(ip.ToString());
 }
+
+// ---------------------------------------------------------------------------
+// Webapp authentication (added 2026-07-20). WinForms clients send no cookie and
+// therefore keep hitting the three IP checks above, byte-for-byte as before.
+// ---------------------------------------------------------------------------
+
+const string SessionCookieName = "skc_session";
+const int SessionHours = 12;                     // one work day, absolute (no sliding renewal)
+const int PbkdfIterations = 100_000;
+const int MinPasswordLength = 8;
+
+// Self-describing hash string (PBKDF2-SHA256$iters$saltB64$hashB64) so the
+// iteration count can be raised later without invalidating existing rows.
+// No new NuGet dependency - Rfc2898DeriveBytes is in the BCL.
+string HashPassword(string password)
+{
+    byte[] salt = RandomNumberGenerator.GetBytes(16);
+    byte[] hash = Rfc2898DeriveBytes.Pbkdf2(password, salt, PbkdfIterations, HashAlgorithmName.SHA256, 32);
+    return $"PBKDF2-SHA256${PbkdfIterations}${Convert.ToBase64String(salt)}${Convert.ToBase64String(hash)}";
+}
+
+// Returns false for anything that isn't a well-formed hash of this shape, which
+// is what makes the seeded '!' sentinel permanently unverifiable rather than a
+// password someone could guess.
+bool VerifyPassword(string password, string stored)
+{
+    var parts = stored.Split('$');
+    if (parts.Length != 4 || parts[0] != "PBKDF2-SHA256") return false;
+    if (!int.TryParse(parts[1], out int iterations) || iterations <= 0) return false;
+    try
+    {
+        byte[] salt = Convert.FromBase64String(parts[2]);
+        byte[] expected = Convert.FromBase64String(parts[3]);
+        byte[] actual = Rfc2898DeriveBytes.Pbkdf2(password, salt, iterations, HashAlgorithmName.SHA256, expected.Length);
+        return CryptographicOperations.FixedTimeEquals(actual, expected);
+    }
+    catch (FormatException) { return false; }
+}
+
+string Sha256Hex(string value) =>
+    Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
+
+SessionUser? CurrentSession(HttpContext http) =>
+    http.Items.TryGetValue("session", out var s) ? s as SessionUser : null;
+
+// The three gates below keep their original names and every call site, so the
+// 14 already-gated endpoints have a zero-line diff. Cookie-less request (any
+// WinForms app, or curl) -> the old IP check verbatim. Session present -> the
+// role must fit AND the same IP check must still pass; the Owner role satisfies
+// all three role checks but is still bound by the IP layer, so the owner logged
+// in on the office PC genuinely cannot do owner-only work. Note the branch gate
+// gets strictly tighter than it was: a session for one branch can't write to
+// another even when that branch is absent from branchIps (fail-open on IP).
+bool IsTrustedOfficeCaller(HttpContext http)
+{
+    var session = CurrentSession(http);
+    if (session == null) return IsTrustedOfficeIp(http);
+    return (session.Role == "Owner" || session.Role == "Office") && IsTrustedOfficeIp(http);
+}
+
+bool IsOwnerCaller(HttpContext http)
+{
+    var session = CurrentSession(http);
+    if (session == null) return IsOwnerIp(http);
+    return session.Role == "Owner" && IsOwnerIp(http);
+}
+
+bool IsTrustedBranchCaller(string branch, HttpContext http)
+{
+    var session = CurrentSession(http);
+    if (session == null) return IsTrustedBranchIp(branch, http);
+    if (session.Role == "Owner") return IsTrustedBranchIp(branch, http);
+    if (session.Role != "Branch") return false;
+    if (!string.Equals(session.BranchName, branch, StringComparison.OrdinalIgnoreCase)) return false;
+    return IsTrustedBranchIp(branch, http);
+}
+
+// Serve the built SPA (skc-api/webapp -> wwwroot) when it's present. Absent in a
+// bare source checkout, hence the guard - the API still runs API-only.
+if (Directory.Exists(Path.Combine(app.Environment.ContentRootPath, "wwwroot")))
+{
+    app.UseDefaultFiles();
+    app.UseStaticFiles();
+}
+
+// Session middleware. Must run before the endpoints so the gate wrappers above
+// can see HttpContext.Items["session"].
+app.Use(async (http, next) =>
+{
+    var token = http.Request.Cookies[SessionCookieName];
+    if (string.IsNullOrEmpty(token)) { await next(); return; }   // WinForms path: not even a DB round-trip
+
+    using var authDb = new NpgsqlConnection(connectionString);
+    await authDb.OpenAsync();
+    // Explicit aliases, not bare snake_case: Dapper's underscore matching is an
+    // opt-in static flag that this project doesn't set, so `user_id` would map
+    // to nothing and hand back a session with UserId = 0 and Role = null.
+    var session = await authDb.QuerySingleOrDefaultAsync<SessionUser>(@"
+        SELECT u.user_id AS UserId, u.username AS Username, u.role AS Role,
+               u.branch_name AS BranchName, u.must_change_password AS MustChangePassword
+        FROM app_sessions s
+        JOIN app_users u ON u.user_id = s.user_id
+        WHERE s.token_hash = @TokenHash
+          AND s.expires_at > CURRENT_TIMESTAMP
+          AND u.is_active", new { TokenHash = Sha256Hex(token) });
+
+    if (session != null)
+    {
+        http.Items["session"] = session;
+        await next();
+        return;
+    }
+
+    // Expired, tampered, logged-out or deactivated. Deliberately a 401 rather
+    // than falling through to the IP-only path: silently downgrading would let
+    // a stale cookie on a trusted PC keep writing as if it were WinForms.
+    // /api/auth/* is exempt so login (and logout of a dead session) still works.
+    if (http.Request.Path.StartsWithSegments("/api") && !http.Request.Path.StartsWithSegments("/api/auth"))
+    {
+        http.Response.Cookies.Delete(SessionCookieName, new CookieOptions { Path = "/" });
+        http.Response.StatusCode = 401;
+        await http.Response.WriteAsJsonAsync(new { error = "Your session has expired. Please sign in again." });
+        return;
+    }
+    await next();
+});
 
 // Shared validation for recipe create/update. Kind mirrors the DB's chk_recipe_kind
 // constraint and quantities must be positive, so a bad value gets a clean 400 instead of
@@ -92,6 +221,308 @@ string? ValidateRecipeDto(RecipeDto dto)
 
 // Endpoints
 app.MapGet("/health", () => Results.Ok(new { Status = "Healthy" }));
+
+// ---------------------------------------------------------------------------
+// Auth endpoints. These are the only ones exempt from the middleware's
+// stale-cookie 401, so a user holding a dead cookie can still log back in.
+// ---------------------------------------------------------------------------
+
+// Mints a token, stores only its hash, and sets the cookie. No Secure flag:
+// everything runs over plain HTTP inside Tailscale (WireGuard already encrypts
+// it) - add Secure the day the droplet gets a `tailscale cert` HTTPS listener.
+// SameSite=Strict is what makes CSRF a non-issue: the browser omits the cookie
+// on every cross-site request, and no CORS policy exists for a fetch to use.
+async Task IssueSessionAsync(NpgsqlConnection db, int userId, HttpContext http)
+{
+    var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();
+    await db.ExecuteAsync(@"
+        INSERT INTO app_sessions (token_hash, user_id, expires_at)
+        VALUES (@TokenHash, @UserId, CURRENT_TIMESTAMP + make_interval(hours => @Hours))",
+        new { TokenHash = Sha256Hex(token), UserId = userId, Hours = SessionHours });
+
+    http.Response.Cookies.Append(SessionCookieName, token, new CookieOptions
+    {
+        HttpOnly = true,
+        SameSite = SameSiteMode.Strict,
+        Path = "/",
+        MaxAge = TimeSpan.FromHours(SessionHours)
+    });
+}
+
+// Is the owner account still sitting on the seeded sentinel hash? Drives the
+// first-run setup screen. Ungated - it leaks nothing an attacker on the tailnet
+// couldn't learn by trying to log in.
+app.MapGet("/api/auth/setup-needed", async () =>
+{
+    using var db = new NpgsqlConnection(connectionString);
+    var hash = await db.ExecuteScalarAsync<string?>(
+        "SELECT password_hash FROM app_users WHERE LOWER(username) = 'owner'");
+    return Results.Ok(new { Needed = hash == "!" });
+});
+
+// First run only: the owner sets their own password from an owner device, so no
+// plaintext ever lives in the migration or in a chat log. 409 forever after.
+app.MapPost("/api/auth/bootstrap", async (BootstrapDto dto, HttpContext http) =>
+{
+    if (!IsOwnerIp(http)) return Results.Problem("This endpoint is restricted to the owner's device.", statusCode: 403);
+    if (dto.Password == null || dto.Password.Length < MinPasswordLength)
+        return Results.BadRequest($"Password must be at least {MinPasswordLength} characters.");
+
+    using var db = new NpgsqlConnection(connectionString);
+    await db.OpenAsync();
+
+    // WHERE password_hash = '!' makes this atomic: a second concurrent call
+    // updates zero rows and gets the 409 rather than overwriting the first.
+    var userId = await db.ExecuteScalarAsync<int?>(@"
+        UPDATE app_users SET password_hash = @Hash, must_change_password = FALSE
+        WHERE LOWER(username) = 'owner' AND password_hash = '!'
+        RETURNING user_id", new { Hash = HashPassword(dto.Password) });
+
+    if (userId == null) return Results.Problem("The owner password has already been set.", statusCode: 409);
+
+    await IssueSessionAsync(db, userId.Value, http);
+    return Results.Ok(new { Status = "Ready" });
+});
+
+// Naive per-IP limiter, same idiom as the website's feedback endpoint. In-memory
+// by design: a restart clearing it is harmless on a single-instance tailnet API.
+var loginAttempts = new ConcurrentDictionary<string, (DateTime WindowStart, int Count)>();
+
+app.MapPost("/api/auth/login", async (LoginDto dto, HttpContext http) =>
+{
+    var ip = http.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+    var now = DateTime.UtcNow;
+    var attempts = loginAttempts.AddOrUpdate(ip,
+        _ => (now, 1),
+        (_, cur) => now - cur.WindowStart > TimeSpan.FromMinutes(5) ? (now, 1) : (cur.WindowStart, cur.Count + 1));
+    if (attempts.Count > 10) return Results.StatusCode(429);
+
+    using var db = new NpgsqlConnection(connectionString);
+    await db.OpenAsync();
+
+    var user = await db.QuerySingleOrDefaultAsync<AppUserRow>(
+        @"SELECT user_id AS UserId, username AS Username, password_hash AS PasswordHash, role AS Role,
+                 branch_name AS BranchName, is_active AS IsActive, must_change_password AS MustChangePassword
+          FROM app_users WHERE LOWER(username) = LOWER(@Username)",
+        new { dto.Username });
+
+    // One generic message for every failure mode - wrong user, wrong password,
+    // deactivated account - so the form can't be used to enumerate accounts.
+    // The hash is still verified against a dummy when the user doesn't exist so
+    // a missing username isn't detectable by response time.
+    var stored = user?.PasswordHash ?? "PBKDF2-SHA256$100000$AAAAAAAAAAAAAAAAAAAAAA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    bool ok = VerifyPassword(dto.Password ?? "", stored) && user != null && user.IsActive;
+    if (!ok) return Results.Problem("Incorrect username or password.", statusCode: 401);
+
+    // Cheap housekeeping while we're already connected - no separate sweeper.
+    await db.ExecuteAsync("DELETE FROM app_sessions WHERE expires_at <= CURRENT_TIMESTAMP");
+
+    await IssueSessionAsync(db, user!.UserId, http);
+    return Results.Ok(new
+    {
+        user.Username,
+        user.Role,
+        user.BranchName,
+        user.MustChangePassword
+    });
+});
+
+app.MapPost("/api/auth/logout", async (HttpContext http) =>
+{
+    var token = http.Request.Cookies[SessionCookieName];
+    if (!string.IsNullOrEmpty(token))
+    {
+        using var db = new NpgsqlConnection(connectionString);
+        await db.ExecuteAsync("DELETE FROM app_sessions WHERE token_hash = @TokenHash",
+            new { TokenHash = Sha256Hex(token) });
+    }
+    http.Response.Cookies.Delete(SessionCookieName, new CookieOptions { Path = "/" });
+    return Results.Ok(new { Status = "SignedOut" });
+});
+
+app.MapGet("/api/auth/me", (HttpContext http) =>
+{
+    var session = CurrentSession(http);
+    if (session == null) return Results.Problem("Not signed in.", statusCode: 401);
+    return Results.Ok(new
+    {
+        session.Username,
+        session.Role,
+        session.BranchName,
+        session.MustChangePassword
+    });
+});
+
+app.MapPost("/api/auth/change-password", async (ChangePasswordDto dto, HttpContext http) =>
+{
+    var session = CurrentSession(http);
+    if (session == null) return Results.Problem("Not signed in.", statusCode: 401);
+    if (dto.NewPassword == null || dto.NewPassword.Length < MinPasswordLength)
+        return Results.BadRequest($"New password must be at least {MinPasswordLength} characters.");
+
+    using var db = new NpgsqlConnection(connectionString);
+    await db.OpenAsync();
+
+    var stored = await db.ExecuteScalarAsync<string>(
+        "SELECT password_hash FROM app_users WHERE user_id = @UserId", new { session.UserId });
+    if (stored == null || !VerifyPassword(dto.CurrentPassword ?? "", stored))
+        return Results.Problem("Current password is incorrect.", statusCode: 403);
+
+    await db.ExecuteAsync(
+        "UPDATE app_users SET password_hash = @Hash, must_change_password = FALSE WHERE user_id = @UserId",
+        new { Hash = HashPassword(dto.NewPassword), session.UserId });
+
+    // Sign out this user's other devices - a password change should evict
+    // whoever might have been using the old one. The current cookie survives.
+    await db.ExecuteAsync(
+        "DELETE FROM app_sessions WHERE user_id = @UserId AND token_hash <> @TokenHash",
+        new { session.UserId, TokenHash = Sha256Hex(http.Request.Cookies[SessionCookieName] ?? "") });
+
+    return Results.Ok(new { Status = "Changed" });
+});
+
+// ---------------------------------------------------------------------------
+// User management - Owner role AND an owner device, both required. Unlike the
+// other gates there's no cookie-less fallback: WinForms has no notion of users,
+// so an unauthenticated caller gets 401 rather than the legacy IP-only path.
+// ---------------------------------------------------------------------------
+IResult? RequireOwnerAdmin(HttpContext http)
+{
+    var session = CurrentSession(http);
+    if (session == null) return Results.Problem("Sign in as the owner to manage users.", statusCode: 401);
+    if (session.Role != "Owner" || !IsOwnerIp(http))
+        return Results.Problem("This endpoint is restricted to the owner.", statusCode: 403);
+    return null;
+}
+
+string? ValidateUserDto(string? username, string role, string? branchName)
+{
+    if (username != null && (username.Trim().Length < 3 || username.Trim().Length > 64))
+        return "Username must be 3-64 characters.";
+    if (role != "Owner" && role != "Office" && role != "Branch")
+        return "Role must be Owner, Office or Branch.";
+    if (role == "Branch" && string.IsNullOrWhiteSpace(branchName))
+        return "A Branch user must be tied to a branch.";
+    return null;
+}
+
+// Would this change leave nobody able to administer users? Counts active Owners
+// other than the one being changed.
+async Task<bool> WouldOrphanOwnersAsync(NpgsqlConnection db, int excludedUserId)
+{
+    int others = await db.ExecuteScalarAsync<int>(
+        "SELECT COUNT(*) FROM app_users WHERE role = 'Owner' AND is_active AND user_id <> @UserId",
+        new { UserId = excludedUserId });
+    return others == 0;
+}
+
+app.MapGet("/api/users", async (HttpContext http) =>
+{
+    var denied = RequireOwnerAdmin(http); if (denied != null) return denied;
+    using var db = new NpgsqlConnection(connectionString);
+    return Results.Ok(await db.QueryAsync<AppUserListRow>(@"
+        SELECT user_id AS UserId, username AS Username, role AS Role, branch_name AS BranchName,
+               is_active AS IsActive, must_change_password AS MustChangePassword, created_at AS CreatedAt
+        FROM app_users ORDER BY role, LOWER(username)"));
+});
+
+app.MapPost("/api/users", async (CreateUserDto dto, HttpContext http) =>
+{
+    var denied = RequireOwnerAdmin(http); if (denied != null) return denied;
+    var invalid = ValidateUserDto(dto.Username, dto.Role, dto.BranchName);
+    if (invalid != null) return Results.BadRequest(invalid);
+    if (dto.Password == null || dto.Password.Length < MinPasswordLength)
+        return Results.BadRequest($"Password must be at least {MinPasswordLength} characters.");
+
+    using var db = new NpgsqlConnection(connectionString);
+    try
+    {
+        // New accounts always start needing a password change, so the owner
+        // never keeps knowing a staff member's working password.
+        int id = await db.ExecuteScalarAsync<int>(@"
+            INSERT INTO app_users (username, password_hash, role, branch_name, must_change_password)
+            VALUES (@Username, @Hash, @Role, @BranchName, TRUE)
+            RETURNING user_id",
+            new
+            {
+                Username = dto.Username!.Trim(),
+                Hash = HashPassword(dto.Password),
+                dto.Role,
+                BranchName = dto.Role == "Branch" ? dto.BranchName!.Trim() : null
+            });
+        return Results.Ok(new { UserId = id });
+    }
+    catch (PostgresException ex) when (ex.SqlState == "23505")
+    {
+        return Results.Problem($"A user named '{dto.Username!.Trim()}' already exists.", statusCode: 409);
+    }
+});
+
+app.MapPut("/api/users/{id:int}", async (int id, UpdateUserDto dto, HttpContext http) =>
+{
+    var denied = RequireOwnerAdmin(http); if (denied != null) return denied;
+    var invalid = ValidateUserDto(null, dto.Role, dto.BranchName);
+    if (invalid != null) return Results.BadRequest(invalid);
+
+    using var db = new NpgsqlConnection(connectionString);
+    await db.OpenAsync();
+
+    var current = await db.QuerySingleOrDefaultAsync<AppUserListRow>(
+        @"SELECT user_id AS UserId, username AS Username, role AS Role, branch_name AS BranchName,
+                 is_active AS IsActive, must_change_password AS MustChangePassword, created_at AS CreatedAt
+          FROM app_users WHERE user_id = @id", new { id });
+    if (current == null) return Results.NotFound($"No user {id}.");
+    if (current.Role == "Owner" && dto.Role != "Owner" && current.IsActive && await WouldOrphanOwnersAsync(db, id))
+        return Results.BadRequest("This is the last active Owner - demoting it would lock everyone out of user management.");
+
+    await db.ExecuteAsync(
+        "UPDATE app_users SET role = @Role, branch_name = @BranchName WHERE user_id = @id",
+        new { dto.Role, BranchName = dto.Role == "Branch" ? dto.BranchName!.Trim() : null, id });
+    return Results.Ok(new { Status = "Updated" });
+});
+
+app.MapPost("/api/users/{id:int}/reset-password", async (int id, ResetPasswordDto dto, HttpContext http) =>
+{
+    var denied = RequireOwnerAdmin(http); if (denied != null) return denied;
+    if (dto.NewPassword == null || dto.NewPassword.Length < MinPasswordLength)
+        return Results.BadRequest($"Password must be at least {MinPasswordLength} characters.");
+
+    using var db = new NpgsqlConnection(connectionString);
+    await db.OpenAsync();
+    int rows = await db.ExecuteAsync(
+        "UPDATE app_users SET password_hash = @Hash, must_change_password = TRUE WHERE user_id = @id",
+        new { Hash = HashPassword(dto.NewPassword), id });
+    if (rows == 0) return Results.NotFound($"No user {id}.");
+
+    // Kick every session of the reset account - the point of a reset is usually
+    // that someone shouldn't still be signed in.
+    await db.ExecuteAsync("DELETE FROM app_sessions WHERE user_id = @id", new { id });
+    return Results.Ok(new { Status = "Reset" });
+});
+
+app.MapPatch("/api/users/{id:int}/deactivate", async (int id, HttpContext http) =>
+{
+    var denied = RequireOwnerAdmin(http); if (denied != null) return denied;
+    using var db = new NpgsqlConnection(connectionString);
+    await db.OpenAsync();
+
+    var role = await db.ExecuteScalarAsync<string?>("SELECT role FROM app_users WHERE user_id = @id", new { id });
+    if (role == null) return Results.NotFound($"No user {id}.");
+    if (role == "Owner" && await WouldOrphanOwnersAsync(db, id))
+        return Results.BadRequest("This is the last active Owner - deactivating it would lock everyone out of user management.");
+
+    await db.ExecuteAsync("UPDATE app_users SET is_active = FALSE WHERE user_id = @id", new { id });
+    await db.ExecuteAsync("DELETE FROM app_sessions WHERE user_id = @id", new { id });
+    return Results.Ok(new { Status = "Deactivated" });
+});
+
+app.MapPatch("/api/users/{id:int}/activate", async (int id, HttpContext http) =>
+{
+    var denied = RequireOwnerAdmin(http); if (denied != null) return denied;
+    using var db = new NpgsqlConnection(connectionString);
+    int rows = await db.ExecuteAsync("UPDATE app_users SET is_active = TRUE WHERE user_id = @id", new { id });
+    return rows == 0 ? Results.NotFound($"No user {id}.") : Results.Ok(new { Status = "Activated" });
+});
 
 app.MapPost("/api/purchases", async (List<PurchaseLogDto> purchases, HttpContext http) =>
 {
@@ -1213,9 +1644,101 @@ app.MapPost("/api/sales/{branch}/{clientSaleId}/void", async (string branch, str
     catch (Exception ex) { await tx.RollbackAsync(); return Results.Problem(ex.Message); }
 });
 
+// SPA fallback: any non-API path that matched no endpoint serves the React shell
+// so deep links and refreshes work. /api/* is excluded on purpose - the whole
+// curl-based verification methodology depends on an unknown endpoint returning a
+// real 404 rather than 200 + a page of HTML.
+if (Directory.Exists(Path.Combine(app.Environment.ContentRootPath, "wwwroot")))
+{
+    app.MapFallback(async http =>
+    {
+        if (http.Request.Path.StartsWithSegments("/api"))
+        {
+            http.Response.StatusCode = 404;
+            return;
+        }
+        // index.html names hashed asset files, so it must never be cached or a
+        // browser will keep asking for chunks the last deploy deleted.
+        http.Response.Headers.CacheControl = "no-cache, no-store, must-revalidate";
+        http.Response.ContentType = "text/html";
+        await http.Response.SendFileAsync(Path.Combine(app.Environment.ContentRootPath, "wwwroot", "index.html"));
+    });
+}
+
 app.Run();
 
 // DTO Schemas matching the SQLite structures
+
+// --- webapp auth -----------------------------------------------------------
+
+// Stashed in HttpContext.Items by the session middleware and read by the gates.
+public class SessionUser
+{
+    public int UserId { get; set; }
+    public string Username { get; set; } = string.Empty;
+    public string Role { get; set; } = string.Empty;   // Owner | Office | Branch
+    public string? BranchName { get; set; }
+    public bool MustChangePassword { get; set; }
+}
+
+public class AppUserRow
+{
+    public int UserId { get; set; }
+    public string Username { get; set; } = string.Empty;
+    public string PasswordHash { get; set; } = string.Empty;
+    public string Role { get; set; } = string.Empty;
+    public string? BranchName { get; set; }
+    public bool IsActive { get; set; }
+    public bool MustChangePassword { get; set; }
+}
+
+// Same shape minus the hash - never serialize AppUserRow to a client.
+public class AppUserListRow
+{
+    public int UserId { get; set; }
+    public string Username { get; set; } = string.Empty;
+    public string Role { get; set; } = string.Empty;
+    public string? BranchName { get; set; }
+    public bool IsActive { get; set; }
+    public bool MustChangePassword { get; set; }
+    public DateTime CreatedAt { get; set; }
+}
+
+public class BootstrapDto
+{
+    public string? Password { get; set; }
+}
+
+public class LoginDto
+{
+    public string? Username { get; set; }
+    public string? Password { get; set; }
+}
+
+public class ChangePasswordDto
+{
+    public string? CurrentPassword { get; set; }
+    public string? NewPassword { get; set; }
+}
+
+public class CreateUserDto
+{
+    public string? Username { get; set; }
+    public string? Password { get; set; }
+    public string Role { get; set; } = string.Empty;
+    public string? BranchName { get; set; }
+}
+
+public class UpdateUserDto
+{
+    public string Role { get; set; } = string.Empty;
+    public string? BranchName { get; set; }
+}
+
+public class ResetPasswordDto
+{
+    public string? NewPassword { get; set; }
+}
 
 public class ClassifyInventoryDto
 {

@@ -1,0 +1,175 @@
+/* Hand-written CSS, no component library (see the plan's dependency list).
+   Colours mirror the WinForms design system adopted 2026-07-19 so the webapp and
+   the installed apps look like one product:
+     WhiteSmoke page, White surfaces, slate #2D3440 headings,
+     SeaGreen primary, Firebrick destructive, Silver borders on neutral buttons. */
+
+:root {
+  --page: #f5f5f5;
+  --surface: #ffffff;
+  --slate: #2d3440;
+  --sea-green: #2e8b57;
+  --firebrick: #b22222;
+  --silver: #c0c0c0;
+  --muted: #6b7280;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--slate);
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  font-size: 15px;
+}
+
+h1 {
+  font-size: 20px;
+  font-weight: 700;
+  margin: 0 0 12px;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.error {
+  color: var(--firebrick);
+  margin: 0;
+}
+
+/* --- app shell ---------------------------------------------------------- */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 0 20px;
+  height: 52px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--silver);
+}
+
+.brand {
+  font-weight: 700;
+  font-size: 18px;
+}
+
+.topbar nav {
+  display: flex;
+  gap: 4px;
+}
+
+.topbar-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.who {
+  font-size: 13px;
+}
+
+.navlink {
+  padding: 6px 12px;
+  border-radius: 4px;
+  color: var(--slate);
+  text-decoration: none;
+}
+
+.navlink:hover {
+  background: var(--page);
+}
+
+.navlink.active {
+  background: var(--sea-green);
+  color: #fff;
+}
+
+main {
+  padding: 24px;
+}
+
+/* --- buttons ------------------------------------------------------------ */
+
+.btn {
+  min-width: 100px;
+  height: 32px;
+  padding: 0 16px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.btn.primary {
+  background: var(--sea-green);
+  color: #fff;
+}
+
+.btn.destructive {
+  background: var(--firebrick);
+  color: #fff;
+}
+
+.btn.neutral {
+  background: #fff;
+  border-color: var(--silver);
+  color: var(--slate);
+}
+
+/* --- forms / cards ------------------------------------------------------ */
+
+.centered {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.card {
+  width: 100%;
+  max-width: 380px;
+  background: var(--surface);
+  border: 1px solid var(--silver);
+  border-radius: 6px;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.card label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+input {
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--silver);
+  border-radius: 4px;
+  font: inherit;
+  font-size: 15px;
+  color: var(--slate);
+  background: #fff;
+}
+
+input:focus {
+  outline: 2px solid var(--sea-green);
+  outline-offset: -1px;
+}
