@@ -8,18 +8,22 @@ interface NavItem {
   roles: Role[]
 }
 
-// Phase 1 ships the shells only; Phase 2 fills them in and adds the report
-// entries. Owner sees everything, so `roles` lists the non-owner roles that
-// also get the item.
+// Top-level sections; each one's screens live in its own SectionNav.
+//
+// The Owner is a superuser and can reach any route, but the Branch section is
+// deliberately NOT offered to them: every screen in it is scoped to the
+// session's own branch_name, which an Owner account doesn't have. The owner
+// reads branch data through the office's "Stock by location" and "Branch sales"
+// reports instead, which take a branch picker.
 const NAV: NavItem[] = [
-  { to: '/office', label: 'Office', roles: ['Office'] },
+  { to: '/office', label: 'Office', roles: ['Owner', 'Office'] },
   { to: '/branch', label: 'Branch', roles: ['Branch'] },
-  { to: '/owner', label: 'Owner', roles: [] },
+  { to: '/owner', label: 'Owner', roles: ['Owner'] },
 ]
 
 export function Layout() {
   const { user, logout } = useAuth()
-  const visible = NAV.filter((i) => user?.role === 'Owner' || (user && i.roles.includes(user.role)))
+  const visible = NAV.filter((i) => user && i.roles.includes(user.role))
 
   return (
     <div className="shell">

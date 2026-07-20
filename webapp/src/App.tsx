@@ -5,18 +5,19 @@ import { useAuth } from './auth/AuthContext'
 import { Login } from './pages/Login'
 import { Setup } from './pages/Setup'
 import { ChangePassword } from './pages/ChangePassword'
-import { OfficeHome } from './pages/office/OfficeHome'
-import { BranchHome } from './pages/branch/BranchHome'
+import { OfficeSection } from './pages/office/OfficeSection'
+import { BranchSection } from './pages/branch/BranchSection'
 import { OwnerHome } from './pages/owner/OwnerHome'
 
-// Signed-in landing: each role starts on its own section.
+// Signed-in landing: each role starts on its own section. The Owner lands on
+// Office, which is where the reports they actually read live (the Owner section
+// is admin - users, recipes, pricing - and arrives in phase 3).
 function Home() {
   const { user, loading } = useAuth()
   if (loading) return <p className="muted">Loading…</p>
   if (!user) return <Navigate to="/login" replace />
   if (user.role === 'Branch') return <Navigate to="/branch" replace />
-  if (user.role === 'Office') return <Navigate to="/office" replace />
-  return <Navigate to="/owner" replace />
+  return <Navigate to="/office" replace />
 }
 
 export function App() {
@@ -41,7 +42,7 @@ export function App() {
           path="/office/*"
           element={
             <RequireRole roles={['Office']}>
-              <OfficeHome />
+              <OfficeSection />
             </RequireRole>
           }
         />
@@ -49,7 +50,7 @@ export function App() {
           path="/branch/*"
           element={
             <RequireRole roles={['Branch']}>
-              <BranchHome />
+              <BranchSection />
             </RequireRole>
           }
         />

@@ -173,3 +173,153 @@ input:focus {
   outline: 2px solid var(--sea-green);
   outline-offset: -1px;
 }
+
+/* --- section sub-nav ----------------------------------------------------- */
+
+.subnav {
+  display: flex;
+  gap: 4px;
+  padding: 10px 24px 0;
+  flex-wrap: wrap;
+}
+
+/* --- toolbars / filters -------------------------------------------------- */
+
+.toolbar {
+  display: flex;
+  align-items: flex-end;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+label.inline {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+label.inline.checkbox {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  height: 34px;
+}
+
+label.inline.checkbox input {
+  height: auto;
+  width: auto;
+}
+
+select {
+  height: 34px;
+  padding: 0 8px;
+  border: 1px solid var(--silver);
+  border-radius: 4px;
+  font: inherit;
+  font-size: 14px;
+  color: var(--slate);
+  background: #fff;
+}
+
+h2 {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 24px 0 10px;
+}
+
+/* --- data table ---------------------------------------------------------- */
+
+/* Reports are wide (the deliveries grid has eight columns); let the table
+   scroll inside its own box so the page body never scrolls sideways. */
+.table-wrap {
+  overflow-x: auto;
+  background: var(--surface);
+  border: 1px solid var(--silver);
+  border-radius: 6px;
+}
+
+table.data {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+table.data th {
+  text-align: left;
+  font-weight: 600;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--muted);
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--silver);
+  white-space: nowrap;
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+}
+
+table.data td {
+  padding: 8px 12px;
+  border-bottom: 1px solid #eceff3;
+  white-space: nowrap;
+}
+
+table.data tbody tr:last-child td {
+  border-bottom: none;
+}
+
+table.data tr.clickable {
+  cursor: pointer;
+}
+
+table.data tr.clickable:hover td {
+  background: #f7faf8;
+}
+
+table.data tr.selected td {
+  background: #e8f2ec;
+}
+
+/* A voided sale is struck through, matching how frmSalesReport greys them. */
+table.data tr.voided td {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
+.pos {
+  color: var(--sea-green);
+}
+
+.neg {
+  color: var(--firebrick);
+}
+
+/* --- status pills -------------------------------------------------------- */
+
+.pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.pill.ok {
+  background: #e3f0e9;
+  color: #1f6640;
+}
+
+.pill.warn {
+  background: #fcf0dd;
+  color: #8a5a12;
+}
+
+.pill.bad {
+  background: #f8e3e3;
+  color: #8c2020;
+}
