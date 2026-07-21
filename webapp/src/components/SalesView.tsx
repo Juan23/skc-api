@@ -3,8 +3,10 @@ import { DataTable } from './DataTable'
 import type { Column } from './DataTable'
 import { DateRangePicker } from './DateRangePicker'
 import { useApi } from '../lib/useApi'
+import { api } from '../api/client'
+import { buildSalesCsv, downloadCsv } from '../lib/csv'
 import { endOfDay, formatMoney, formatQty, formatTimestamp, localDate, sumMoney } from '../lib/format'
-import type { SaleLine, SaleSummary } from '../api/types'
+import type { SaleLine, SaleLineExport, SaleSummary } from '../api/types'
 
 // POS sales for one branch, with per-sale line detail. Shared by the office's
 // Branch Sales Report and the branch's own Sales History.
@@ -31,9 +33,46 @@ export function SalesView({ branch }: { branch: string }) {
     selected ? `/api/sales/${encodeURIComponent(branch)}/${encodeURIComponent(selected)}` : null,
   )
 
+  // The dates the on-screen rows were actually loaded with - the export uses
+  // these, not the live picker values, so the CSV and the table always agree
+  // even when the pickers have been changed since Load (same rule as
+  // frmSalesReport's loadedStart/loadedEnd).
+  const [loaded, setLoaded] = useState<{ start: string; end: string }>({
+    start: localDate(7),
+    end: localDate(),
+  })
+  const [exporting, setExporting] = useState(false)
+  const [exportError, setExportError] = useState('')
+
   function load() {
     setSelected(null)
+    setLoaded({ start, end })
     setQuery(`/api/sales?branch=${encodeURIComponent(branch)}&start=${start}&end=${endOfDay(end)}`)
+  }
+
+  // Line-level CSV for Excel (one row per item per sale, SUMIFS-friendly) via
+  // /api/sales/lines - the same server rows frmSalesReport's export reads.
+  async function exportCsv() {
+    setExportError('')
+    setExporting(true)
+    try {
+      const rows = await api.get<SaleLineExport[]>(
+        `/api/sales/lines?branch=${encodeURIComponent(branch)}&start=${loaded.start}&end=${endOfDay(loaded.end)}`,
+      )
+      if (rows.length === 0) {
+        setExportError('There are no sales in this date range to export.')
+        return
+      }
+      const name =
+        loaded.start === loaded.end
+          ? `SKC-Sales-${branch}-${loaded.start}.csv`
+          : `SKC-Sales-${branch}-${loaded.start}_to_${loaded.end}.csv`
+      downloadCsv(name, buildSalesCsv(rows))
+    } catch (err) {
+      setExportError(err instanceof Error ? err.message : 'Export failed.')
+    } finally {
+      setExporting(false)
+    }
   }
 
   const saleColumns: Column<SaleSummary>[] = [
@@ -74,7 +113,12 @@ export function SalesView({ branch }: { branch: string }) {
 
   return (
     <>
-      <DateRangePicker start={start} end={end} onStart={setStart} onEnd={setEnd} onLoad={load} busy={sales.loading} />
+      <DateRangePicker start={start} end={end} onStart={setStart} onEnd={setEnd} onLoad={load} busy={sales.loading}>
+        <button className="btn neutral" onClick={() => void exportCsv()} disabled={exporting || !sales.data}>
+          {exporting ? 'Exporting…' : 'Export CSV'}
+        </button>
+      </DateRangePicker>
+      {exportError && <p className="error">{exportError}</p>}
       {sales.data && (
         <p className="muted">
           {sales.data.length} sales, total {formatMoney(takings)}

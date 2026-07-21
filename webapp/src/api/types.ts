@@ -144,6 +144,23 @@ export interface SaleLine {
   shortfallQty: number
 }
 
+// GET /api/sales/lines - one row per item per sale, flattened with its parent
+// sale's identity. Feeds the CSV export (the same shape frmSalesReport's Excel
+// export consumes); voided sales are included, flagged by `voided`.
+export interface SaleLineExport {
+  saleNo: number
+  clientSaleId: string
+  soldAt: string
+  staffName: string
+  voided: boolean
+  sku: string | null
+  description: string
+  qty: number
+  unitPrice: number
+  lineTotal: number
+  shortfallQty: number
+}
+
 // --- recipes (owner-managed; baking and decorating share one shape) ---
 
 export interface RecipeLine {
