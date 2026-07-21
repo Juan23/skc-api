@@ -85,6 +85,59 @@ function QtyCell({ line, onCommit }: { line: CartLine; onCommit: (line: CartLine
   )
 }
 
+// Same raw-text-buffer pattern as QtyCell, for the same reason: binding the
+// input's `value` straight to centavosToDecimalString(tendered) reformatted
+// the box to "N.00" on every keystroke (typing "1" -> 100c -> "1.00"), so the
+// trailing ".00" blocked typing any further digits. The buffer lets the
+// cashier type freely; it only reformats from the canonical value when that
+// value changes *externally* (a quick-cash chip, or a reset), never from the
+// user's own edits - guarded by comparing the incoming centavos against what's
+// already typed, so a keystroke round-tripping through the parent can't clobber
+// the text mid-entry.
+// A number <input> accepts non-empty-but-unparseable intermediate states (a
+// lone "." or "-", "1e", ...). Number() of those is NaN, and letting NaN reach
+// cart.tenderedCentavos is worse than the ".00" bug: it survives commitSale's
+// `?? 0` (which only catches null/undefined) and JSON.stringify turns it into a
+// wire `null`, silently dropping the cash the cashier thought they entered.
+// Treat any non-finite parse exactly like empty -> null.
+function parseCash(text: string): number | null {
+  const t = text.trim()
+  if (t === '') return null
+  const pesos = Number(t)
+  return Number.isFinite(pesos) ? toCentavos(pesos) : null
+}
+
+function CashInput({
+  valueCentavos,
+  onChange,
+}: {
+  valueCentavos: number | null
+  onChange: (centavos: number | null) => void
+}) {
+  const [text, setText] = useState(valueCentavos == null ? '' : centavosToDecimalString(valueCentavos))
+
+  useEffect(() => {
+    if (parseCash(text) !== valueCentavos) {
+      setText(valueCentavos == null ? '' : centavosToDecimalString(valueCentavos))
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [valueCentavos])
+
+  return (
+    <input
+      id="pos-cash"
+      type="number"
+      min={0}
+      step="0.01"
+      value={text}
+      onChange={(e) => {
+        setText(e.target.value)
+        onChange(parseCash(e.target.value))
+      }}
+    />
+  )
+}
+
 // Quick-cash presets: exact change, then the total rounded up to the nearest
 // ₱100/₱500/₱1000 - a cashier is normally handed a round bill, not the exact
 // centavo amount. Rounding up (never down) means every preset is always a
@@ -412,17 +465,7 @@ export function SaleScreen({ catalog, onComplete }: Props) {
 
           <div className="pos-cash-row">
             <label htmlFor="pos-cash">Cash</label>
-            <input
-              id="pos-cash"
-              type="number"
-              min={0}
-              step="0.01"
-              value={cart.tenderedCentavos == null ? '' : centavosToDecimalString(cart.tenderedCentavos)}
-              onChange={(e) => {
-                const v = e.target.value
-                cart.setTenderedCentavos(v === '' ? null : toCentavos(Number(v)))
-              }}
-            />
+            <CashInput valueCentavos={cart.tenderedCentavos} onChange={cart.setTenderedCentavos} />
           </div>
           <div className="pos-quick-cash">
             {quickCashOptions(cart.totalCentavos).map((c) => (
