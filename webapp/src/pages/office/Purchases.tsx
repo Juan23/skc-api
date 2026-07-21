@@ -241,8 +241,18 @@ export function Purchases() {
 
   const ticketColumns: Column<PurchaseTicket>[] = [
     { header: 'Date', cell: (t) => formatDate(t.date) },
-    { header: 'Ticket', cell: (t) => t.transactionId },
-    { header: 'Supplier', cell: (t) => t.supplier || '' },
+    // Supplier leads (staff scan by date + where it was bought); the ticket id
+    // rides underneath as a muted subtitle for cross-checking, instead of taking
+    // its own column. Mirrors the item + SKU stack in the line detail.
+    {
+      header: 'Supplier',
+      cell: (t) => (
+        <div className="stacked-cell">
+          <span>{t.supplier || '—'}</span>
+          <span className="sub">{t.transactionId}</span>
+        </div>
+      ),
+    },
     { header: 'Total', align: 'right', cell: (t) => formatMoney(t.totalAmount) },
     {
       header: '',
@@ -276,9 +286,9 @@ export function Purchases() {
         // Deactivated SKUs aren't in the catalog: show just the SKU on the top
         // line and drop the subtitle, so it isn't printed twice.
         return (
-          <div className="item-cell">
+          <div className="stacked-cell">
             <span>{p ? productName(p) : l.sku}</span>
-            {p && <span className="item-sku">{l.sku}</span>}
+            {p && <span className="sub">{l.sku}</span>}
           </div>
         )
       },

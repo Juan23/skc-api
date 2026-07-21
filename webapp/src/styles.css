@@ -356,14 +356,17 @@ table.data tr.voided td {
   }
 }
 
-/* Item identity in a narrow detail cell: the readable name on top, the SKU as a
-   muted subtitle beneath (replaces the old separate SKU/Brand/Base name cols). */
-.item-cell {
+/* A stacked table cell: a primary value on top with a muted secondary line
+   beneath - e.g. item name + SKU in a line detail, or supplier + ticket id in a
+   ticket summary. Lets a two-field pair share one column instead of two, so the
+   readable value leads and the reference id stays available without its own
+   column eating horizontal space. */
+.stacked-cell {
   display: flex;
   flex-direction: column;
   line-height: 1.25;
 }
-.item-cell .item-sku {
+.stacked-cell .sub {
   font-size: 11px;
   color: var(--muted);
 }

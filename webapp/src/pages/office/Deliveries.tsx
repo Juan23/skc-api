@@ -222,8 +222,18 @@ export function Deliveries() {
 
   const ticketColumns: Column<DeliveryTicket>[] = [
     { header: 'Date', cell: (t) => formatDate(t.date) },
-    { header: 'Ticket', cell: (t) => t.transactionId },
-    { header: 'To branch', cell: (t) => t.toBranch },
+    // Destination branch leads (staff scan by date + where it's going); the ticket
+    // id rides underneath as a muted subtitle for cross-checking, freeing a column
+    // in this already-wide table. Mirrors Purchases' supplier + ticket stack.
+    {
+      header: 'To branch',
+      cell: (t) => (
+        <div className="stacked-cell">
+          <span>{t.toBranch}</span>
+          <span className="sub">{t.transactionId}</span>
+        </div>
+      ),
+    },
     { header: 'Items', align: 'right', cell: (t) => formatQty(t.totalItems) },
     { header: 'Requester', cell: (t) => t.requester || '' },
     // Reason lives in the detail panel, not the master — this table is already 8
@@ -281,9 +291,9 @@ export function Deliveries() {
         // Deactivated SKUs aren't in the catalog: show just the SKU on the top
         // line and drop the subtitle, so it isn't printed twice.
         return (
-          <div className="item-cell">
+          <div className="stacked-cell">
             <span>{p ? productName(p) : l.sku}</span>
-            {p && <span className="item-sku">{l.sku}</span>}
+            {p && <span className="sub">{l.sku}</span>}
           </div>
         )
       },
