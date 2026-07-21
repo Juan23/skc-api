@@ -2,7 +2,7 @@ import { useMemo, useRef, useState } from 'react'
 import { DataTable } from '../../components/DataTable'
 import type { Column } from '../../components/DataTable'
 import { DateRangePicker } from '../../components/DateRangePicker'
-import { ProductPicker, productLabel } from '../../components/ProductPicker'
+import { ProductPicker, productLabel, productName } from '../../components/ProductPicker'
 import { useApi } from '../../lib/useApi'
 import { api } from '../../api/client'
 import { endOfDay, formatDate, formatMoney, formatQty, localDate, sumMoney } from '../../lib/format'
@@ -55,6 +55,7 @@ export function Purchases() {
   const [picked, setPicked] = useState<InventoryRow | null>(null)
   const [qty, setQty] = useState('')
   const [cost, setCost] = useState('')
+  const [totalCost, setTotalCost] = useState('')
   const [byPack, setByPack] = useState(false)
 
   const [busy, setBusy] = useState(false)
@@ -76,12 +77,47 @@ export function Purchases() {
     setPicked(null)
     setQty('')
     setCost('')
+    setTotalCost('')
     setByPack(false)
   }
 
   function pick(p: InventoryRow) {
     setPicked(p)
     setByPack(false)
+  }
+
+  // Two-way unit-cost <-> total-cost binding, mirroring Purchases.cs
+  // (CalculateTotalCost / CalculateUnitCostFromTotal): editing qty or the unit
+  // cost recomputes the total; editing the total back-solves the unit cost. In
+  // pack mode "qty" is packs and "cost" is per-pack, so the same total = qty ×
+  // cost identity holds. All guarded on qty > 0 so an empty qty never divides by
+  // zero or clobbers a field with a spurious 0.
+  function onQty(v: string) {
+    setQty(v)
+    const q = Number(v)
+    if (!(q > 0)) return
+    // Whichever of cost/total the user already supplied is the source; recompute
+    // the other from the new qty. Preferring cost keeps the WinForms behaviour
+    // (qty change refreshes the total), but if only a total was typed - e.g. the
+    // user entered the receipt total first, then the qty - derive the unit cost
+    // from it instead, so the cost never silently stays 0.
+    if (cost !== '' && Number(cost) >= 0) setTotalCost((q * Number(cost)).toFixed(2))
+    else if (totalCost !== '' && Number(totalCost) >= 0)
+      setCost(String(Math.round((Number(totalCost) / q) * 10000) / 10000))
+  }
+  function onCost(v: string) {
+    setCost(v)
+    const q = Number(qty)
+    const c = Number(v)
+    if (q > 0 && v !== '' && c >= 0) setTotalCost((q * c).toFixed(2))
+  }
+  function onTotal(v: string) {
+    setTotalCost(v)
+    const q = Number(qty)
+    const t = Number(v)
+    // Round the derived unit cost to 4dp (unit_cost is NUMERIC(18,4)) rather than
+    // carrying a full binary tail into the field.
+    if (q > 0 && v !== '' && t >= 0) setCost(String(Math.round((t / q) * 10000) / 10000))
   }
 
   function addLine() {
@@ -93,6 +129,9 @@ export function Purchases() {
     // are bought whole (the office app's NumericUpDown is DecimalPlaces=0, so a
     // fractional pack count can't be entered there either).
     if (!Number.isInteger(q) || q <= 0) return setError('Quantity must be a whole number greater than zero.')
+    // A blank cost must not slip through as 0 (Number('') === 0): require an
+    // explicit unit or total cost. A deliberate 0 is still allowed.
+    if (cost.trim() === '') return setError('Enter a unit cost or a total cost.')
     if (!(c >= 0)) return setError('Unit cost cannot be negative.')
 
     const usePack = byPack && picked.packmultiplier > 1
@@ -199,10 +238,26 @@ export function Purchases() {
     },
   ]
 
+  // One "Item" column (brand + base name, with the SKU as a muted subtitle)
+  // instead of three separate identity columns — staff read by item name, and the
+  // detail panel is too narrow for SKU/Brand/Base name to each get their own
+  // column without clipping. A deactivated SKU isn't in the catalog, so fall back
+  // to just the SKU.
   const lineColumns: Column<PurchaseLine>[] = [
-    { header: 'SKU', cell: (l) => l.sku },
-    { header: 'Brand', cell: (l) => catBySku.get(l.sku)?.brand || '' },
-    { header: 'Base name', cell: (l) => catBySku.get(l.sku)?.basename ?? l.sku },
+    {
+      header: 'Item',
+      cell: (l) => {
+        const p = catBySku.get(l.sku)
+        // Deactivated SKUs aren't in the catalog: show just the SKU on the top
+        // line and drop the subtitle, so it isn't printed twice.
+        return (
+          <div className="item-cell">
+            <span>{p ? productName(p) : l.sku}</span>
+            {p && <span className="item-sku">{l.sku}</span>}
+          </div>
+        )
+      },
+    },
     { header: 'Qty', align: 'right', cell: (l) => formatQty(l.qty) },
     { header: 'Unit cost', align: 'right', cell: (l) => formatMoney(l.unitCost) },
     { header: 'Line total', align: 'right', cell: (l) => formatMoney(l.qty * l.unitCost) },
@@ -245,23 +300,15 @@ export function Purchases() {
             </label>
             <label className="inline">
               {byPack && picked && picked.packmultiplier > 1 ? 'Packs' : 'Qty (base units)'}
-              <input
-                type="number"
-                min={1}
-                step={1}
-                value={qty}
-                onChange={(e) => setQty(e.target.value)}
-              />
+              <input type="number" min={1} step={1} value={qty} onChange={(e) => onQty(e.target.value)} />
             </label>
             <label className="inline">
               {byPack && picked && picked.packmultiplier > 1 ? 'Cost per pack' : 'Unit cost'}
-              <input
-                type="number"
-                min={0}
-                step="0.01"
-                value={cost}
-                onChange={(e) => setCost(e.target.value)}
-              />
+              <input type="number" min={0} step="0.01" value={cost} onChange={(e) => onCost(e.target.value)} />
+            </label>
+            <label className="inline">
+              Total cost
+              <input type="number" min={0} step="0.01" value={totalCost} onChange={(e) => onTotal(e.target.value)} />
             </label>
             <button className="btn neutral" onClick={addLine} disabled={busy || !picked}>
               Add line
@@ -328,6 +375,11 @@ export function Purchases() {
         </div>
       )}
 
+      {/* The report is hidden while entering a new purchase, so the screen shows
+          only the entry form and nothing competes for focus. It returns when the
+          entry panel is closed. */}
+      {!entryOpen && (
+        <>
       <DateRangePicker start={start} end={end} onStart={setStart} onEnd={setEnd} onLoad={load} busy={tickets.loading} />
       {tickets.data && (
         <p className="muted">
@@ -364,6 +416,8 @@ export function Purchases() {
           )}
         </div>
       </div>
+        </>
+      )}
     </section>
   )
 }

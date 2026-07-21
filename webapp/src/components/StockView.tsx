@@ -26,11 +26,8 @@ export function StockView({ branch }: { branch: string }) {
       // never received, which is a lot of noise at a branch - hence the default.
       if (inStockOnly && r.currentstock === 0) return false
       if (!term) return true
-      return (
-        r.sku.toLowerCase().includes(term) ||
-        r.basename.toLowerCase().includes(term) ||
-        (r.brand ?? '').toLowerCase().includes(term)
-      )
+      // Brand + item name only, not SKU (site-wide search rule).
+      return r.basename.toLowerCase().includes(term) || (r.brand ?? '').toLowerCase().includes(term)
     })
   }, [data, search, inStockOnly])
 
@@ -52,7 +49,7 @@ export function StockView({ branch }: { branch: string }) {
       <div className="toolbar">
         <label className="inline">
           Search
-          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="SKU, brand or item" />
+          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="brand or item" />
         </label>
         <label className="inline checkbox">
           <input type="checkbox" checked={inStockOnly} onChange={(e) => setInStockOnly(e.target.checked)} />

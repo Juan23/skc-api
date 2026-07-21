@@ -315,12 +315,16 @@ table.data tr.voided td {
   align-items: flex-start;
 }
 .master-detail .master {
-  flex: 2.5 1 0; /* the widest master (Deliveries, 8 cols) needs the room so its action buttons stay on-screen */
+  /* Was 2.5 — the master lists are only a handful of short columns, so a large
+     ratio just spread them out and left dead space between cells. 1.8 keeps
+     Deliveries' wider (8-col) master roomy enough for its action buttons while
+     giving the detail panel real breathing room. */
+  flex: 1.8 1 0;
   min-width: 0; /* let a still-too-wide table scroll inside its .table-wrap instead of overflowing */
 }
 .master-detail .detail {
   flex: 1 1 0;
-  min-width: 340px;
+  min-width: 400px;
   position: sticky;
   top: 16px; /* stays in view as the taller master list scrolls with the page */
   /* Cap to the viewport so a many-line ticket's detail scrolls WITHIN the pinned
@@ -330,6 +334,38 @@ table.data tr.voided td {
 }
 .master-detail .detail h2 {
   margin-top: 0;
+}
+
+/* HD (1366-class) screens don't have the width for a comfortable side-by-side
+   split, so below this breakpoint the detail drops to full width BELOW the
+   master list instead of being crushed beside it. FHD keeps the side-by-side. */
+@media (max-width: 1400px) {
+  .master-detail {
+    flex-direction: column;
+  }
+  .master-detail .master,
+  .master-detail .detail {
+    flex: none;
+    width: 100%;
+  }
+  .master-detail .detail {
+    /* Stacked below the list, it no longer needs to pin to the viewport — let it
+       size to its content and scroll with the page. */
+    position: static;
+    max-height: none;
+  }
+}
+
+/* Item identity in a narrow detail cell: the readable name on top, the SKU as a
+   muted subtitle beneath (replaces the old separate SKU/Brand/Base name cols). */
+.item-cell {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.25;
+}
+.item-cell .item-sku {
+  font-size: 11px;
+  color: var(--muted);
 }
 .detail-empty {
   border: 1px dashed var(--silver);

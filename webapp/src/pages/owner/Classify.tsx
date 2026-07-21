@@ -33,11 +33,9 @@ export function Classify() {
     if (!data) return null
     const term = search.trim().toLowerCase()
     if (!term) return data
+    // Brand + item name only, not SKU (site-wide search rule).
     return data.filter(
-      (r) =>
-        r.sku.toLowerCase().includes(term) ||
-        r.basename.toLowerCase().includes(term) ||
-        (r.brand ?? '').toLowerCase().includes(term),
+      (r) => r.basename.toLowerCase().includes(term) || (r.brand ?? '').toLowerCase().includes(term),
     )
   }, [data, search])
 
@@ -145,7 +143,7 @@ export function Classify() {
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="SKU, brand or item"
+            placeholder="brand or item"
           />
         </label>
         <span className="muted">{rows ? `${rows.length} of ${data?.length ?? 0} items` : ''}</span>

@@ -77,6 +77,7 @@ export function AdjustmentHistory() {
       setNewCount('')
       setUnitCost('')
       setReason('')
+      setOpen(false) // reveal the log so the new adjustment is visibly confirmed
       catalog.reload() // stock changed; refresh the picker's "current" figure
       reload() // and the history below
     } catch (err) {
@@ -192,28 +193,34 @@ export function AdjustmentHistory() {
         </div>
       )}
 
-      <DateRangePicker start={start} end={end} onStart={setStart} onEnd={setEnd} onLoad={loadHistory} busy={loading}>
-        <label className="inline">
-          Location
-          <select value={branch} onChange={(e) => setBranch(e.target.value)}>
-            <option value="">All</option>
-            {STOCK_LOCATIONS.map((b) => (
-              <option key={b} value={b}>
-                {b}
-              </option>
-            ))}
-          </select>
-        </label>
-      </DateRangePicker>
-      {data && <p className="muted">{data.length} adjustments</p>}
-      <DataTable
-        columns={columns}
-        rows={data}
-        loading={loading}
-        error={error}
-        rowKey={(a, i) => `${a.date}-${a.sku}-${i}`}
-        empty="No adjustments in this range."
-      />
+      {/* Hidden while entering an adjustment, so the count form has the screen to
+          itself; the log returns when the entry panel closes. */}
+      {!open && (
+        <>
+          <DateRangePicker start={start} end={end} onStart={setStart} onEnd={setEnd} onLoad={loadHistory} busy={loading}>
+            <label className="inline">
+              Location
+              <select value={branch} onChange={(e) => setBranch(e.target.value)}>
+                <option value="">All</option>
+                {STOCK_LOCATIONS.map((b) => (
+                  <option key={b} value={b}>
+                    {b}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </DateRangePicker>
+          {data && <p className="muted">{data.length} adjustments</p>}
+          <DataTable
+            columns={columns}
+            rows={data}
+            loading={loading}
+            error={error}
+            rowKey={(a, i) => `${a.date}-${a.sku}-${i}`}
+            empty="No adjustments in this range."
+          />
+        </>
+      )}
     </section>
   )
 }

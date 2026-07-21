@@ -2,7 +2,7 @@ import { useMemo, useRef, useState } from 'react'
 import { DataTable } from '../../components/DataTable'
 import type { Column } from '../../components/DataTable'
 import { DateRangePicker } from '../../components/DateRangePicker'
-import { ProductPicker, productLabel } from '../../components/ProductPicker'
+import { ProductPicker, productLabel, productName } from '../../components/ProductPicker'
 import { useApi } from '../../lib/useApi'
 import { api } from '../../api/client'
 import { endOfDay, formatDate, formatMoney, formatQty, localDate, localTimestamp, sumMoney } from '../../lib/format'
@@ -268,10 +268,26 @@ export function Deliveries() {
     },
   ]
 
+  // One "Item" column (brand + base name, with the SKU as a muted subtitle)
+  // instead of three separate identity columns — staff read by item name, and the
+  // detail panel is too narrow for SKU/Brand/Base name to each get their own
+  // column without clipping. A deactivated SKU isn't in the catalog, so fall back
+  // to just the SKU.
   const lineColumns: Column<DeliveryLine>[] = [
-    { header: 'SKU', cell: (l) => l.sku },
-    { header: 'Brand', cell: (l) => catBySku.get(l.sku)?.brand || '' },
-    { header: 'Base name', cell: (l) => catBySku.get(l.sku)?.basename ?? l.sku },
+    {
+      header: 'Item',
+      cell: (l) => {
+        const p = catBySku.get(l.sku)
+        // Deactivated SKUs aren't in the catalog: show just the SKU on the top
+        // line and drop the subtitle, so it isn't printed twice.
+        return (
+          <div className="item-cell">
+            <span>{p ? productName(p) : l.sku}</span>
+            {p && <span className="item-sku">{l.sku}</span>}
+          </div>
+        )
+      },
+    },
     { header: 'Qty', align: 'right', cell: (l) => formatQty(l.qty) },
     { header: 'Line cost', align: 'right', cell: (l) => formatMoney(l.totalLineCost) },
   ]
@@ -399,6 +415,10 @@ export function Deliveries() {
         </div>
       )}
 
+      {/* Hidden while entering/amending, so the entry form has the screen to
+          itself; returns when the entry panel closes. */}
+      {!entryOpen && (
+        <>
       <DateRangePicker start={start} end={end} onStart={setStart} onEnd={setEnd} onLoad={load} busy={tickets.loading}>
         <label className="inline">
           Branch
@@ -453,6 +473,8 @@ export function Deliveries() {
           )}
         </div>
       </div>
+        </>
+      )}
     </section>
   )
 }

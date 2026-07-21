@@ -43,7 +43,9 @@ export function ProductPicker({ catalog, onPick, placeholder, disabled }: Props)
     const tokens = term.split(/\s+/).filter(Boolean)
     return catalog
       .filter((p) => {
-        const haystack = `${p.brand ?? ''} ${p.basename} ${p.sku}`.toLowerCase()
+        // Brand + base name only, no SKU - staff search by the human name, and
+        // this matches the site-wide rule that searches never key off the SKU.
+        const haystack = `${p.brand ?? ''} ${p.basename}`.toLowerCase()
         return tokens.every((t) => haystack.includes(t))
       })
       .slice(0, 20) // keep the dropdown short; refine the search for more
@@ -79,7 +81,7 @@ export function ProductPicker({ catalog, onPick, placeholder, disabled }: Props)
       <input
         value={text}
         disabled={disabled}
-        placeholder={placeholder ?? 'Search SKU, brand or item'}
+        placeholder={placeholder ?? 'Search brand or item'}
         onChange={(e) => {
           setText(e.target.value)
           setOpen(true)
@@ -105,7 +107,7 @@ export function ProductPicker({ catalog, onPick, placeholder, disabled }: Props)
                 commit(i)
               }}
             >
-              {productLabel(p)}
+              {productName(p)}
             </li>
           ))}
         </ul>

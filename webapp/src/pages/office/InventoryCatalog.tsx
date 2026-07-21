@@ -42,11 +42,8 @@ export function InventoryCatalog() {
     return data.filter((r) => {
       if (category && r.category !== category) return false
       if (!term) return true
-      return (
-        r.sku.toLowerCase().includes(term) ||
-        r.basename.toLowerCase().includes(term) ||
-        (r.brand ?? '').toLowerCase().includes(term)
-      )
+      // Brand + item name only, not SKU (site-wide search rule).
+      return r.basename.toLowerCase().includes(term) || (r.brand ?? '').toLowerCase().includes(term)
     })
   }, [data, search, category])
 
@@ -251,7 +248,7 @@ export function InventoryCatalog() {
       <div className="toolbar">
         <label className="inline">
           Search
-          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="SKU, brand or item" />
+          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="brand or item" />
         </label>
         <label className="inline">
           Category
