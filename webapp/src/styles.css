@@ -336,10 +336,13 @@ table.data tr.voided td {
   margin-top: 0;
 }
 
-/* HD (1366-class) screens don't have the width for a comfortable side-by-side
-   split, so below this breakpoint the detail drops to full width BELOW the
-   master list instead of being crushed beside it. FHD keeps the side-by-side. */
-@media (max-width: 1400px) {
+/* Below this width the side-by-side split can't hold: the Deliveries master (the
+   widest table) starts clipping its right-most column around a ~1040px viewport,
+   so stack the detail full-width below the master instead. Lowered from 1400 once
+   the summaries dropped their Ticket column and the detail item name learned to
+   wrap - side-by-side now stays comfortable down to HD widths (1366 and typical
+   laptops), stacking only on genuinely narrow / split windows. */
+@media (max-width: 1080px) {
   .master-detail {
     flex-direction: column;
   }
@@ -365,10 +368,16 @@ table.data tr.voided td {
   display: flex;
   flex-direction: column;
   line-height: 1.25;
+  /* Let the primary line wrap: in a narrow detail panel a long product name
+     would otherwise force its column wide and push the numeric columns off the
+     edge (horizontal scroll). Wrapping keeps every column visible; the numeric
+     cells stay nowrap via the base table rule. */
+  white-space: normal;
 }
 .stacked-cell .sub {
   font-size: 11px;
   color: var(--muted);
+  white-space: nowrap; /* keep the SKU / ticket id on one line, never hyphen-broken */
 }
 .detail-empty {
   border: 1px dashed var(--silver);
