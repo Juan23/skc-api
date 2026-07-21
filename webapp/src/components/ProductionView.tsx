@@ -1,10 +1,11 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { DataTable } from './DataTable'
 import type { Column } from './DataTable'
 import { DateRangePicker } from './DateRangePicker'
+import { productName } from './ProductPicker'
 import { useApi } from '../lib/useApi'
 import { endOfDay, formatMoney, formatQty, formatTimestamp, localDate, sumMoney } from '../lib/format'
-import type { ProductionBatch } from '../api/types'
+import type { InventoryRow, ProductionBatch } from '../api/types'
 
 // Baking and decorating batches for one branch. Shared by the branch's own
 // Production screen and the office's Production report - same endpoint and
@@ -21,6 +22,15 @@ export function ProductionView({ branch }: { branch: string }) {
   )
 
   const { data, loading, error } = useApi<ProductionBatch[]>(query)
+  // Output rows carry only the SKU; staff read by item name. Join against the
+  // catalog for a name column. A deactivated output SKU won't be in /api/inventory,
+  // so fall back to the SKU itself rather than a blank cell.
+  const catalog = useApi<InventoryRow[]>('/api/inventory')
+  const nameBySku = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const p of catalog.data ?? []) m.set(p.sku, productName(p))
+    return m
+  }, [catalog.data])
 
   function load() {
     setQuery(`/api/production?branch=${encodeURIComponent(branch)}&start=${start}&end=${endOfDay(end)}`)
@@ -35,6 +45,7 @@ export function ProductionView({ branch }: { branch: string }) {
     { header: 'Staff', cell: (b) => b.staffName || '' },
     { header: '×', align: 'right', cell: (b) => formatQty(b.batchMultiplier) },
     { header: 'Output SKU', cell: (b) => b.outputSku },
+    { header: 'Output item', cell: (b) => nameBySku.get(b.outputSku) ?? b.outputSku },
     { header: 'Made', align: 'right', cell: (b) => formatQty(b.outputQty) },
     { header: 'Input cost', align: 'right', cell: (b) => formatMoney(b.totalInputCost) },
   ]

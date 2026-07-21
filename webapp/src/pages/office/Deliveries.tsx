@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { DataTable } from '../../components/DataTable'
 import type { Column } from '../../components/DataTable'
 import { DateRangePicker } from '../../components/DateRangePicker'
@@ -40,6 +40,15 @@ export function Deliveries() {
   const tickets = useApi<DeliveryTicket[]>(query)
   const lines = useApi<DeliveryLine[]>(selected ? `/api/deliveries/${encodeURIComponent(selected)}` : null)
   const catalog = useApi<InventoryRow[]>('/api/inventory')
+
+  // Line rows carry only the SKU; staff read by item name, not SKU. Join against
+  // the catalog for the brand and base name. A deactivated SKU won't be in
+  // /api/inventory (active-only), so fall back to the SKU rather than a blank.
+  const catBySku = useMemo(() => {
+    const m = new Map<string, InventoryRow>()
+    for (const p of catalog.data ?? []) m.set(p.sku, p)
+    return m
+  }, [catalog.data])
 
   // --- entry state -------------------------------------------------------
   const [entryOpen, setEntryOpen] = useState(false)
@@ -259,6 +268,8 @@ export function Deliveries() {
 
   const lineColumns: Column<DeliveryLine>[] = [
     { header: 'SKU', cell: (l) => l.sku },
+    { header: 'Brand', cell: (l) => catBySku.get(l.sku)?.brand || '' },
+    { header: 'Base name', cell: (l) => catBySku.get(l.sku)?.basename ?? l.sku },
     { header: 'Qty', align: 'right', cell: (l) => formatQty(l.qty) },
     { header: 'Line cost', align: 'right', cell: (l) => formatMoney(l.totalLineCost) },
   ]
@@ -404,28 +415,36 @@ export function Deliveries() {
           {pending > 0 ? ` — ${pending} still in transit` : ''}
         </p>
       )}
-      <DataTable
-        columns={ticketColumns}
-        rows={rows}
-        loading={tickets.loading}
-        error={tickets.error}
-        rowKey={(t) => t.transactionId}
-        onRowClick={(t) => setSelected(t.transactionId)}
-        selectedKey={selected}
-        empty="No deliveries in this range."
-      />
-      {selected && (
-        <>
-          <h2>Lines — {selected}</h2>
+      <div className="master-detail">
+        <div className="master">
           <DataTable
-            columns={lineColumns}
-            rows={lines.data}
-            loading={lines.loading}
-            error={lines.error}
-            rowKey={(l, i) => `${l.sku}-${i}`}
+            columns={ticketColumns}
+            rows={rows}
+            loading={tickets.loading}
+            error={tickets.error}
+            rowKey={(t) => t.transactionId}
+            onRowClick={(t) => setSelected(t.transactionId)}
+            selectedKey={selected}
+            empty="No deliveries in this range."
           />
-        </>
-      )}
+        </div>
+        <div className="detail">
+          {selected ? (
+            <>
+              <h2>Lines — {selected}</h2>
+              <DataTable
+                columns={lineColumns}
+                rows={lines.data}
+                loading={lines.loading}
+                error={lines.error}
+                rowKey={(l, i) => `${l.sku}-${i}`}
+              />
+            </>
+          ) : (
+            <p className="muted detail-empty">Select a ticket to see its items.</p>
+          )}
+        </div>
+      </div>
     </section>
   )
 }

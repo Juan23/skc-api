@@ -126,29 +126,37 @@ export function SalesView({ branch }: { branch: string }) {
           {voided > 0 ? ` — ${voided} voided (excluded)` : ''}
         </p>
       )}
-      <DataTable
-        columns={saleColumns}
-        rows={sales.data}
-        loading={sales.loading}
-        error={sales.error}
-        rowKey={(s) => s.clientSaleId}
-        onRowClick={(s) => setSelected(s.clientSaleId)}
-        selectedKey={selected}
-        rowClass={(s) => (s.voided ? 'voided' : undefined)}
-        empty="No sales in this range."
-      />
-      {selected && (
-        <>
-          <h2>Sale detail</h2>
+      <div className="master-detail">
+        <div className="master">
           <DataTable
-            columns={lineColumns}
-            rows={lines.data}
-            loading={lines.loading}
-            error={lines.error}
-            rowKey={(l, i) => `${l.sku ?? 'discount'}-${i}`}
+            columns={saleColumns}
+            rows={sales.data}
+            loading={sales.loading}
+            error={sales.error}
+            rowKey={(s) => s.clientSaleId}
+            onRowClick={(s) => setSelected(s.clientSaleId)}
+            selectedKey={selected}
+            rowClass={(s) => (s.voided ? 'voided' : undefined)}
+            empty="No sales in this range."
           />
-        </>
-      )}
+        </div>
+        <div className="detail">
+          {selected ? (
+            <>
+              <h2>Sale detail</h2>
+              <DataTable
+                columns={lineColumns}
+                rows={lines.data}
+                loading={lines.loading}
+                error={lines.error}
+                rowKey={(l, i) => `${l.sku ?? 'discount'}-${i}`}
+              />
+            </>
+          ) : (
+            <p className="muted detail-empty">Select a sale to see its items.</p>
+          )}
+        </div>
+      </div>
     </>
   )
 }

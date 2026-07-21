@@ -111,46 +111,53 @@ export function PendingDeliveries() {
       {error && <p className="error">{error}</p>}
       {notice && <p className="notice">{notice}</p>}
 
-      <DataTable
-        columns={ticketColumns}
-        rows={pending.data}
-        loading={pending.loading}
-        error={pending.error}
-        rowKey={(t) => t.transactionId}
-        onRowClick={(t) => setSelected(t.transactionId)}
-        selectedKey={selected}
-        empty="No deliveries waiting — you're all caught up."
-      />
-
-      {selectedTicket && (
-        <>
-          <h2>Items — {selectedTicket.transactionId}</h2>
+      <div className="master-detail">
+        <div className="master">
           <DataTable
-            columns={lineColumns}
-            rows={displayLines}
-            loading={lines.loading}
-            error={lines.error}
-            rowKey={(l) => l.item}
+            columns={ticketColumns}
+            rows={pending.data}
+            loading={pending.loading}
+            error={pending.error}
+            rowKey={(t) => t.transactionId}
+            onRowClick={(t) => setSelected(t.transactionId)}
+            selectedKey={selected}
+            empty="No deliveries waiting — you're all caught up."
           />
-          <div className="toolbar" style={{ marginTop: 12 }}>
-            <label className="inline">
-              Received &amp; checked by
-              <input
-                value={acceptedBy}
-                onChange={(e) => setAcceptedBy(e.target.value)}
-                placeholder="Your name"
+        </div>
+        <div className="detail">
+          {selectedTicket ? (
+            <>
+              <h2>Items — {selectedTicket.transactionId}</h2>
+              <DataTable
+                columns={lineColumns}
+                rows={displayLines}
+                loading={lines.loading}
+                error={lines.error}
+                rowKey={(l) => l.item}
               />
-            </label>
-            <button
-              className="btn primary"
-              onClick={() => void accept(selectedTicket)}
-              disabled={busy || !acceptedBy.trim()}
-            >
-              {busy ? 'Accepting…' : 'Accept delivery'}
-            </button>
-          </div>
-        </>
-      )}
+              <div className="toolbar" style={{ marginTop: 12 }}>
+                <label className="inline">
+                  Received &amp; checked by
+                  <input
+                    value={acceptedBy}
+                    onChange={(e) => setAcceptedBy(e.target.value)}
+                    placeholder="Your name"
+                  />
+                </label>
+                <button
+                  className="btn primary"
+                  onClick={() => void accept(selectedTicket)}
+                  disabled={busy || !acceptedBy.trim()}
+                >
+                  {busy ? 'Accepting…' : 'Accept delivery'}
+                </button>
+              </div>
+            </>
+          ) : (
+            <p className="muted detail-empty">Select a delivery to review its items.</p>
+          )}
+        </div>
+      </div>
     </section>
   )
 }

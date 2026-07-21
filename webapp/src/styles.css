@@ -299,6 +299,36 @@ table.data tr.voided td {
   color: var(--firebrick);
 }
 
+/* --- master/detail split ------------------------------------------------- */
+
+/* Master/detail split for the ticket/sale report screens: the row list on the
+   left, the selected row's detail in a sticky panel on the right so a long list
+   never has to be scrolled to reach the detail. Desktop-only. */
+.master-detail {
+  display: flex;
+  gap: 18px;
+  align-items: flex-start;
+}
+.master-detail .master {
+  flex: 1.6 1 0;
+  min-width: 0; /* let the wide ticket table scroll inside its .table-wrap instead of overflowing */
+}
+.master-detail .detail {
+  flex: 1 1 0;
+  min-width: 340px;
+  position: sticky;
+  top: 16px; /* stays in view as the taller master list scrolls with the page */
+}
+.master-detail .detail h2 {
+  margin-top: 0;
+}
+.detail-empty {
+  border: 1px dashed var(--silver);
+  border-radius: 6px;
+  padding: 24px;
+  text-align: center;
+}
+
 /* --- status pills -------------------------------------------------------- */
 
 .pill {

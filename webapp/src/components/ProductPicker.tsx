@@ -14,10 +14,14 @@ import type { InventoryRow } from '../api/types'
 
 // Some catalog rows repeat the same text in brand and base_name; joining blindly
 // renders "Fifo Test Fifo Test", so collapse that case (same helper the Recipes
-// screen uses).
+// screen uses). productName is the brand+item text alone; productLabel prefixes
+// the SKU for the picker's dropdown ("sku — Brand Item").
+export function productName(p: InventoryRow): string {
+  return p.brand && p.brand !== p.basename ? `${p.brand} ${p.basename}` : p.basename
+}
+
 export function productLabel(p: InventoryRow): string {
-  const name = p.brand && p.brand !== p.basename ? `${p.brand} ${p.basename}` : p.basename
-  return `${p.sku} — ${name}`
+  return `${p.sku} — ${productName(p)}`
 }
 
 interface Props {
