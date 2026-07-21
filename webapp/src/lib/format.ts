@@ -63,3 +63,18 @@ export function localDate(daysAgo = 0): string {
   const pad = (n: number) => String(n).padStart(2, '0')
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
 }
+
+// The wall-clock now as `YYYY-MM-DD HH:mm:ss`, built from local parts (the office
+// PC runs PH local time). This is a value we MINT, not one we render back from the
+// server, so unlike formatTimestamp it legitimately reads the machine clock - it
+// mirrors exactly what Delivery.cs sends (DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")),
+// which the server stores verbatim as the client-local delivery time. RULE 1 above
+// is about not re-parsing server strings through Date; producing "now" is fine.
+export function localTimestamp(): string {
+  const d = new Date()
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return (
+    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
+    ` ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+  )
+}

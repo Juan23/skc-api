@@ -1,15 +1,16 @@
 import { Navigate, Route, Routes } from 'react-router-dom'
 import { SectionNav } from '../../components/SectionNav'
 import { InventoryCatalog } from './InventoryCatalog'
-import { PurchasesReport } from './PurchasesReport'
+import { Purchases } from './Purchases'
 import { Deliveries } from './Deliveries'
 import { AdjustmentHistory } from './AdjustmentHistory'
 import { BranchInventoryReport } from './BranchInventoryReport'
 import { BranchSalesReport } from './BranchSalesReport'
 import { ProductionReport } from './ProductionReport'
 
-// Phase 2 is read-only. The write screens (purchases entry, delivery create /
-// edit-ticket, product add/edit, adjust) arrive in phase 4 and slot in here.
+// Phase 4 added the write side: purchases entry + delete, delivery create /
+// edit-ticket / delete, product add / edit / deactivate, and stock adjust all
+// live inside these same screens (an entry panel above each report).
 const ITEMS = [
   { to: '/office', label: 'Catalog' },
   { to: '/office/purchases', label: 'Purchases' },
@@ -26,7 +27,7 @@ export function OfficeSection() {
       <SectionNav items={ITEMS} />
       <Routes>
         <Route index element={<InventoryCatalog />} />
-        <Route path="purchases" element={<PurchasesReport />} />
+        <Route path="purchases" element={<Purchases />} />
         <Route path="deliveries" element={<Deliveries />} />
         <Route path="adjustments" element={<AdjustmentHistory />} />
         <Route path="stock" element={<BranchInventoryReport />} />

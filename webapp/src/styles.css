@@ -377,3 +377,52 @@ table.data tr.voided td {
   color: #1f6640;
   margin: 0;
 }
+
+/* --- product typeahead (purchase / delivery entry) ---------------------- */
+
+.picker {
+  position: relative;
+  display: inline-block;
+  min-width: 320px;
+}
+
+.picker input {
+  width: 100%;
+}
+
+.picker-list {
+  position: absolute;
+  z-index: 20;
+  top: 100%;
+  left: 0;
+  right: 0;
+  margin: 2px 0 0;
+  padding: 0;
+  list-style: none;
+  max-height: 240px;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--silver);
+  border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+}
+
+.picker-list li {
+  padding: 7px 10px;
+  font-size: 14px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.picker-list li:hover,
+.picker-list li.active {
+  background: #e8f2ec;
+}
+
+/* A form-level validation / status line above the draft grid. */
+.entry-hint {
+  font-size: 13px;
+  margin: 0 0 10px;
+}
