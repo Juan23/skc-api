@@ -8,6 +8,7 @@ import { ChangePassword } from './pages/ChangePassword'
 import { OfficeSection } from './pages/office/OfficeSection'
 import { BranchSection } from './pages/branch/BranchSection'
 import { OwnerSection } from './pages/owner/OwnerSection'
+import { Pos } from './pos/Pos'
 
 // Signed-in landing: each role starts on its own section. The Owner lands on
 // Office, which is where the reports they actually read live (the Owner section
@@ -27,12 +28,18 @@ export function App() {
   // A must-change-password account can't reach anything else. The server doesn't
   // enforce this (the flag is advisory there) - it exists so a shared account's
   // owner-issued password gets replaced by the person actually using it.
-  if (user?.mustChangePassword && location.pathname !== '/change-password') {
+  // Skipped on /pos: that route runs its own PosAuthProvider/identity, entirely
+  // separate from this shared AuthContext's `user` - which may be stale or
+  // unrelated if the same browser previously signed into the back-office as a
+  // different account, and must never hijack a running till.
+  const onPos = location.pathname === '/pos' || location.pathname.startsWith('/pos/')
+  if (user?.mustChangePassword && location.pathname !== '/change-password' && !onPos) {
     return <Navigate to="/change-password" replace />
   }
 
   return (
     <Routes>
+      <Route path="/pos" element={<Pos />} />
       <Route path="/login" element={<Login />} />
       <Route path="/setup" element={<Setup />} />
       <Route path="/change-password" element={<ChangePassword />} />

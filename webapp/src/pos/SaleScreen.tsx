@@ -9,13 +9,11 @@ import './pos.css'
 // modern touch-friendly split (product grid + cart rail) rather than mirroring
 // the WinForms frmPos layout - the underlying cart/money logic (useCart,
 // money.ts) is unchanged and already covered by the increment's tests, only
-// the presentation here is new. Cart only: nothing here writes to IndexedDB or
-// the network. `onComplete` is undefined until Increment 4 wires up the
-// durable-commit sequence; until then the button exists so the screen's shape
-// is real, but can't actually be pressed.
-//
-// Not mounted on any route yet - Increment 5 adds the chromeless /pos route
-// this will live under, once PosAuthProvider exists to guard it.
+// the presentation here is new. Still cart-only itself: this component never
+// touches IndexedDB or the network directly - `onComplete` (wired by Pos.tsx,
+// Increment 5) is the durable-commit sequence, awaited here so the cart only
+// resets and shows the "sale complete" confirmation once the sale is actually
+// durable, never speculatively.
 export interface CompletedSale {
   staffName: string
   lines: CartLine[]
@@ -26,7 +24,7 @@ export interface CompletedSale {
 
 interface Props {
   catalog: InventoryRow[]
-  onComplete?: (sale: CompletedSale) => void
+  onComplete?: (sale: CompletedSale) => Promise<void>
 }
 
 function productName(p: InventoryRow): string {
@@ -163,6 +161,7 @@ export function SaleScreen({ catalog, onComplete }: Props) {
   // Tap again (or use the cart's +) for more.
   function addOne(product: InventoryRow) {
     setError('')
+    setLastSale(null)
     const already = cartQtyRef.current.get(product.sku) ?? 0
     const projected = already + 1
 
@@ -234,20 +233,40 @@ export function SaleScreen({ catalog, onComplete }: Props) {
   // interactive control, not a descendant, which is what this is.
   const [announcement, setAnnouncement] = useState('')
 
+  const [completing, setCompleting] = useState(false)
+  // Shown in the cart-lines area right after a reset, replacing the ordinary
+  // "tap an item" empty state once - the counter's only confirmation that the
+  // sale actually went through, since this app deliberately never prints a
+  // receipt (see MEMORY: pos-void-and-branch-history-scope). Cleared by the
+  // next tap-to-add.
+  const [lastSale, setLastSale] = useState<{ total: number; change: number | null } | null>(null)
+
   const hasSellableLine = cart.lines.some((l) => l.sku != null)
   const canComplete =
-    !!onComplete && cart.staffName.trim() !== '' && hasSellableLine && cart.totalCentavos >= 0
+    !!onComplete && !completing && cart.staffName.trim() !== '' && hasSellableLine && cart.totalCentavos >= 0
 
-  function complete() {
+  async function complete() {
     if (!onComplete || !canComplete) return
     if (!window.confirm(`Complete this sale for ${formatCentavos(cart.totalCentavos)}?`)) return
-    onComplete({
-      staffName: cart.staffName.trim(),
-      lines: cart.lines,
-      totalCentavos: cart.totalCentavos,
-      tenderedCentavos: cart.tenderedCentavos,
-      changeCentavos: cart.changeCentavos,
-    })
+    const total = cart.totalCentavos
+    const change = cart.changeCentavos
+    setCompleting(true)
+    setError('')
+    try {
+      await onComplete({
+        staffName: cart.staffName.trim(),
+        lines: cart.lines,
+        totalCentavos: total,
+        tenderedCentavos: cart.tenderedCentavos,
+        changeCentavos: change,
+      })
+      cart.reset()
+      setLastSale({ total, change })
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not record the sale - try again.')
+    } finally {
+      setCompleting(false)
+    }
   }
 
   return (
@@ -305,7 +324,16 @@ export function SaleScreen({ catalog, onComplete }: Props) {
 
         <div className="pos-cart-lines">
           {cart.lines.length === 0 ? (
-            <p className="pos-cart-empty">Tap an item to add it to the sale.</p>
+            lastSale ? (
+              <div className="pos-last-sale" role="status">
+                <p className="pos-last-sale-total">Sale complete — {formatCentavos(lastSale.total)}</p>
+                {lastSale.change != null && lastSale.change >= 0 && (
+                  <p className="pos-last-sale-change">Change: {formatCentavos(lastSale.change)}</p>
+                )}
+              </div>
+            ) : (
+              <p className="pos-cart-empty">Tap an item to add it to the sale.</p>
+            )
           ) : (
             cart.lines.map((l) => (
               <div className="pos-line" key={l.key}>
@@ -431,7 +459,7 @@ export function SaleScreen({ catalog, onComplete }: Props) {
             disabled={!canComplete}
             title={onComplete ? undefined : 'Coming in the next increment'}
           >
-            Complete sale
+            {completing ? 'Recording…' : 'Complete sale'}
           </button>
         </div>
       </div>

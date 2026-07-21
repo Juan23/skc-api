@@ -39,8 +39,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // A 401 from any other endpoint means the session died mid-session (12h
   // expiry, a password change elsewhere, deactivation). Drop the user and send
   // them to login carrying where they were, so re-login resumes in place.
+  // Never on /pos: the till's own sync engine (webapp-pos-plan.md §3) expects
+  // a 401 mid-sync as a normal, recoverable event (session cookie expired ->
+  // retry cookie-less) and must keep selling through it - this global
+  // listener redirecting the tab away from the chromeless POS is exactly the
+  // "fatal for a till" failure mode the plan calls out. AuthProvider wraps the
+  // whole app (main.tsx), so this listener is always mounted regardless of
+  // route; the guard has to live here, not in the POS code, since /pos never
+  // calls useAuth() at all.
   useEffect(() => {
     const onExpired = () => {
+      const p = window.location.pathname
+      if (p === '/pos' || p.startsWith('/pos/')) return
       setUser(null)
       const here = window.location.pathname + window.location.search
       navigate(`/login?next=${encodeURIComponent(here)}`, { replace: true })
