@@ -161,6 +161,38 @@ export interface SaleLineExport {
   shortfallQty: number
 }
 
+// POST /api/sales's write-side contract (webapp-pos-plan.md Increment 4) -
+// mirrors Program.cs's PosSaleDto/PosSaleLineDto/PosSaleSyncResult exactly
+// (C# PascalCase binds case-insensitively, but these use the same camelCase
+// convention every other write endpoint in this file already does). The
+// server has no custom JSON options, so its `decimal` fields bind from a
+// JSON NUMBER token, not a string - unlike some other money fields in this
+// codebase's client code, these must NOT be sent as toFixed() strings.
+// pos/money.ts's centavosToWireNumber() converts from the internal integer-
+// centavo value to that number exactly once, at serialization time.
+export interface PosSaleLineDto {
+  sku: string | null // null = discount line, no inventory effect
+  description: string
+  qty: number
+  unitPrice: number
+  lineTotal: number
+}
+
+export interface PosSaleDto {
+  clientSaleId: string // GUID minted offline by the POS - the idempotency key
+  branch: string
+  staffName: string
+  soldAt: string // counter time (localTimestamp()), not sync time
+  totalAmount: number
+  lines: PosSaleLineDto[]
+}
+
+export interface PosSaleSyncResult {
+  clientSaleId: string
+  status: 'Synced' | 'AlreadySynced' | 'SyncedWithShortfall' | 'Rejected'
+  detail: string
+}
+
 // --- recipes (owner-managed; baking and decorating share one shape) ---
 
 export interface RecipeLine {
