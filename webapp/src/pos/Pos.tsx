@@ -12,7 +12,35 @@ import { getCachedCatalog } from './catalogSync'
 import { PosAuthProvider, usePosAuth } from './posAuth'
 import { PosStatusBadge } from './PosStatusBadge'
 import { usePosSync } from './syncEngine'
+import { DayLog } from './DayLog'
 import './pos.css'
+
+type PosView = 'sell' | 'daylog'
+
+function PosNav({ view, onChange }: { view: PosView; onChange: (v: PosView) => void }) {
+  return (
+    <div className="pos-nav" role="tablist" aria-label="POS views">
+      <button
+        type="button"
+        role="tab"
+        aria-selected={view === 'sell'}
+        className={`pos-nav-btn${view === 'sell' ? ' active' : ''}`}
+        onClick={() => onChange('sell')}
+      >
+        Sell
+      </button>
+      <button
+        type="button"
+        role="tab"
+        aria-selected={view === 'daylog'}
+        className={`pos-nav-btn${view === 'daylog' ? ' active' : ''}`}
+        onClick={() => onChange('daylog')}
+      >
+        Today&rsquo;s sales
+      </button>
+    </div>
+  )
+}
 
 function SignInForm({
   onSubmit,
@@ -101,6 +129,7 @@ function SignInOverlay() {
 function PosInner() {
   const auth = usePosAuth()
   const [catalog, setCatalog] = useState<InventoryRow[]>([])
+  const [view, setView] = useState<PosView>('sell')
 
   const refreshCatalog = useCallback(() => {
     void getCachedCatalog().then(setCatalog)
@@ -128,9 +157,16 @@ function PosInner() {
 
   return (
     <div className="pos-page">
+      <PosNav view={view} onChange={setView} />
       <PosStatusBadge authMode={auth.mode} syncStatus={sync.status} pendingCount={sync.pendingCount} />
       {auth.mode === 'signin-required' && <SignInOverlay />}
-      <SaleScreen catalog={catalog} onComplete={handleComplete} />
+      {/* Both views stay mounted; only 'sell' is display:none'd when hidden so a
+          part-built cart isn't lost by switching to the day log and back. The
+          day log remounts each time it's shown (keyed by view) to re-pull. */}
+      <div style={{ display: view === 'sell' ? 'contents' : 'none' }}>
+        <SaleScreen catalog={catalog} onComplete={handleComplete} />
+      </div>
+      {view === 'daylog' && branchName && <DayLog branch={branchName} voidedBy={auth.identity?.username ?? ''} />}
     </div>
   )
 }

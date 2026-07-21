@@ -25,8 +25,10 @@
   display: grid;
   grid-template-columns: 1fr 400px;
   gap: 20px;
-  height: calc(100vh - 32px);
-  padding: 16px;
+  /* Top band (52px) is reserved for the fixed view nav (left) and status badge
+     (right) so neither overlaps the catalog search / cart header below. */
+  height: calc(100vh - 68px);
+  padding: 52px 16px 16px;
 }
 
 @media (max-width: 900px) {
@@ -493,6 +495,282 @@
   align-items: center;
   justify-content: center;
   height: 100vh;
+}
+
+/* --- view nav (Sell / Today's sales), fixed top-left --------------------- */
+
+.pos-nav {
+  position: fixed;
+  top: 10px;
+  left: 16px;
+  z-index: 20;
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  background: var(--surface);
+  border: 1px solid var(--silver);
+  border-radius: 999px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.pos-nav-btn {
+  border: none;
+  background: none;
+  padding: 6px 16px;
+  border-radius: 999px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.pos-nav-btn.active {
+  background: var(--sea-green);
+  color: #fff;
+}
+
+/* --- day log (today's sales + same-day void) ----------------------------- */
+
+.pos-daylog {
+  display: grid;
+  grid-template-columns: 1fr 380px;
+  gap: 20px;
+  height: calc(100vh - 68px);
+  padding: 52px 16px 16px;
+}
+
+@media (max-width: 900px) {
+  .pos-daylog {
+    grid-template-columns: 1fr;
+    height: auto;
+  }
+}
+
+.pos-daylog-list {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.pos-daylog-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+  flex-shrink: 0;
+}
+
+.pos-daylog-head h1 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.pos-daylog-takings {
+  text-align: right;
+}
+
+.pos-daylog-takings span {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--sea-green);
+}
+
+.pos-daylog-takings small {
+  display: block;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.pos-daylog-empty {
+  color: var(--muted);
+  text-align: center;
+  padding: 48px 0;
+}
+
+.pos-daylog-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.pos-daylog-row {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 52px 1fr auto auto;
+  gap: 10px;
+  align-items: center;
+  padding: 12px;
+  margin-bottom: 8px;
+  border: 1px solid var(--silver);
+  border-radius: 10px;
+  background: var(--surface);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: var(--slate);
+}
+
+.pos-daylog-row:hover {
+  border-color: var(--sea-green);
+}
+
+.pos-daylog-row.selected {
+  border-color: var(--sea-green);
+  box-shadow: 0 0 0 1px var(--sea-green);
+}
+
+.pos-daylog-row.voided .pos-daylog-amt {
+  text-decoration: line-through;
+  color: var(--muted);
+}
+
+.pos-daylog-time {
+  font-size: 13px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.pos-daylog-who {
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pos-daylog-amt {
+  font-size: 15px;
+  font-weight: 700;
+  text-align: right;
+}
+
+.pos-daylog-badge {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  padding: 2px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.pos-daylog-badge.ok {
+  background: #e7f3ec;
+  color: var(--sea-green);
+}
+
+.pos-daylog-badge.warn {
+  background: #fbf1dd;
+  color: #8a5a12;
+}
+
+.pos-daylog-badge.error {
+  background: #f7e3e3;
+  color: var(--firebrick);
+}
+
+.pos-daylog-badge.muted {
+  background: #eef0f3;
+  color: var(--muted);
+}
+
+.pos-daylog-detail {
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--silver);
+  border-radius: 12px;
+  padding: 16px;
+  overflow-y: auto;
+}
+
+.pos-daylog-detail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.pos-daylog-detail-head h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.pos-daylog-lines {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 12px 0;
+}
+
+.pos-daylog-lines td {
+  padding: 6px 0;
+  border-bottom: 1px solid #eceff3;
+  font-size: 14px;
+  vertical-align: top;
+}
+
+.pos-daylog-lines td.q {
+  width: 48px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.pos-daylog-lines td.amt {
+  width: 90px;
+  text-align: right;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.pos-daylog-lines tr.discount td {
+  color: var(--sea-green);
+}
+
+.pos-daylog-total-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 16px;
+  font-weight: 700;
+  padding-top: 10px;
+  border-top: 2px solid var(--silver);
+}
+
+.pos-daylog-total-row .voided-amt {
+  text-decoration: line-through;
+  color: var(--muted);
+}
+
+.pos-daylog-void {
+  width: 100%;
+  margin-top: 12px;
+}
+
+.pos-daylog-voided-note {
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+  margin-top: 12px;
+}
+
+.pos-daylog-confirm {
+  margin-top: 12px;
+}
+
+.pos-daylog-confirm p {
+  font-size: 13px;
+  margin: 0 0 8px;
+}
+
+.pos-daylog-confirm-btns {
+  display: flex;
+  gap: 8px;
+}
+
+.pos-daylog-confirm-btns .btn {
+  flex: 1;
 }
 
 /* SignInForm renders bare <input>s (aria-label, no <label> wrapper) since it's
