@@ -226,7 +226,9 @@ export function Deliveries() {
     { header: 'To branch', cell: (t) => t.toBranch },
     { header: 'Items', align: 'right', cell: (t) => formatQty(t.totalItems) },
     { header: 'Requester', cell: (t) => t.requester || '' },
-    { header: 'Reason', cell: (t) => t.reason || '' },
+    // Reason lives in the detail panel, not the master — this table is already 8
+    // columns wide and the split narrows it; keeping Reason here pushed the
+    // Edit/Delete actions off the right edge.
     { header: 'Cost', align: 'right', cell: (t) => formatMoney(t.totalCost) },
     {
       header: 'Status',
@@ -277,6 +279,7 @@ export function Deliveries() {
   const total = rows ? sumMoney(rows.map((t) => t.totalCost)) : 0
   const pending = rows?.filter((t) => t.status === 'InTransit').length ?? 0
   const draftItems = draft.reduce((n, l) => n + l.qty, 0)
+  const selectedTicket = rows?.find((t) => t.transactionId === selected) ?? null
 
   return (
     <section>
@@ -432,6 +435,11 @@ export function Deliveries() {
           {selected ? (
             <>
               <h2>Lines — {selected}</h2>
+              {selectedTicket?.reason && (
+                <p className="muted" style={{ marginTop: -4 }}>
+                  Reason: {selectedTicket.reason}
+                </p>
+              )}
               <DataTable
                 columns={lineColumns}
                 rows={lines.data}

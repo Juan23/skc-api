@@ -281,6 +281,11 @@ table.data tr.clickable:hover td {
   background: #f7faf8;
 }
 
+table.data tr.clickable:focus-visible {
+  outline: 2px solid var(--sea-green);
+  outline-offset: -2px;
+}
+
 table.data tr.selected td {
   background: #e8f2ec;
 }
@@ -310,14 +315,18 @@ table.data tr.voided td {
   align-items: flex-start;
 }
 .master-detail .master {
-  flex: 1.6 1 0;
-  min-width: 0; /* let the wide ticket table scroll inside its .table-wrap instead of overflowing */
+  flex: 2.5 1 0; /* the widest master (Deliveries, 8 cols) needs the room so its action buttons stay on-screen */
+  min-width: 0; /* let a still-too-wide table scroll inside its .table-wrap instead of overflowing */
 }
 .master-detail .detail {
   flex: 1 1 0;
   min-width: 340px;
   position: sticky;
   top: 16px; /* stays in view as the taller master list scrolls with the page */
+  /* Cap to the viewport so a many-line ticket's detail scrolls WITHIN the pinned
+     panel instead of the whole (taller-than-screen) panel scrolling away. */
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
 }
 .master-detail .detail h2 {
   margin-top: 0;

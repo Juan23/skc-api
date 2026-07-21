@@ -63,7 +63,31 @@ export function DataTable<T>({
               .filter(Boolean)
               .join(' ')
             return (
-              <tr key={key} className={classes} onClick={onRowClick ? () => onRowClick(row) : undefined}>
+              <tr
+                key={key}
+                className={classes}
+                onClick={onRowClick ? () => onRowClick(row) : undefined}
+                // Keyboard access for the master/detail selection: a clickable row
+                // is focusable and Enter/Space select it, mirroring the click.
+                tabIndex={onRowClick ? 0 : undefined}
+                aria-selected={onRowClick ? selectedKey === key : undefined}
+                onKeyDown={
+                  onRowClick
+                    ? (e) => {
+                        // Only when the ROW itself is focused — not a keydown that
+                        // bubbled up from a focusable child (e.g. an in-cell Edit/
+                        // Delete button). Without this guard, Enter/Space on such a
+                        // button would preventDefault the button's own activation
+                        // and just re-select the row instead.
+                        if (e.target !== e.currentTarget) return
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault()
+                          onRowClick(row)
+                        }
+                      }
+                    : undefined
+                }
+              >
                 {columns.map((c, i) => (
                   <td key={i} style={{ textAlign: c.align ?? 'left' }}>
                     {c.cell(row)}

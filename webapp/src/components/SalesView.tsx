@@ -143,7 +143,7 @@ export function SalesView({ branch }: { branch: string }) {
         <div className="detail">
           {selected ? (
             <>
-              <h2>Sale detail</h2>
+              <h2>Sale #{sales.data?.find((s) => s.clientSaleId === selected)?.localId ?? ''} detail</h2>
               <DataTable
                 columns={lineColumns}
                 rows={lines.data}
