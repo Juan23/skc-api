@@ -3,11 +3,13 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Data;
 using System.Linq;
+using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Configuration;
 using Dapper;
@@ -16,7 +18,31 @@ using Npgsql;
 var builder = WebApplication.CreateBuilder(args);
 var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
 
+// The API's own published port is bound to a specific host IP (100.84.79.35), not
+// 0.0.0.0/127.0.0.1 - so a `tailscale serve` reverse proxy running on the droplet
+// itself (needed for HTTPS, see webapp-pos-plan.md Increment 0) connects to the
+// container over that same address, and that's the RemoteIpAddress the container
+// sees for every proxied request (confirmed empirically via tcpdump - Docker does
+// NOT rewrite it to the bridge gateway IP here, unlike typical hairpin-NAT setups).
+// Trusting exactly that one address as the sole known proxy - never a broader
+// network/loopback range - means only tailscale serve running on this host can
+// ever supply a trusted X-Forwarded-For; no tailnet peer can spoof it, since they
+// can't make a packet appear to originate from the droplet's own address over
+// Tailscale's WireGuard fabric. This also means every existing IsTrustedOfficeIp/
+// IsOwnerIp/IsTrustedBranchIp check below needs zero code changes: the middleware
+// rewrites HttpContext.Connection.RemoteIpAddress in place before those run.
+builder.Services.Configure<ForwardedHeadersOptions>(options =>
+{
+    options.ForwardedHeaders = ForwardedHeaders.XForwardedFor;
+    options.KnownNetworks.Clear();
+    options.KnownProxies.Clear();
+    options.KnownProxies.Add(IPAddress.Parse("100.84.79.35"));
+});
+
 var app = builder.Build();
+
+// Must run before every other middleware/endpoint - see the KnownProxies comment above.
+app.UseForwardedHeaders();
 
 // Office/owner IP allowlist. Tailscale assigns each device on the tailnet a stable 100.x
 // address, so checking the caller's remote IP is a real server-side restriction rather than
@@ -159,7 +185,23 @@ bool IsTrustedBranchCaller(string branch, HttpContext http)
 if (Directory.Exists(Path.Combine(app.Environment.ContentRootPath, "wwwroot")))
 {
     app.UseDefaultFiles();
-    app.UseStaticFiles();
+    app.UseStaticFiles(new StaticFileOptions
+    {
+        OnPrepareResponse = ctx =>
+        {
+            // sw.js/registerSW.js/manifest.webmanifest are NOT content-hashed
+            // (unlike /assets/*.js) - the default static-file response only
+            // carries an ETag, which lets a browser skip revalidation inside
+            // its own heuristic freshness window instead of always asking.
+            // A stale cached service worker is the classic PWA deploy bug,
+            // so force revalidation on every request for exactly these.
+            var name = Path.GetFileName(ctx.File.Name);
+            if (name is "sw.js" or "registerSW.js" or "manifest.webmanifest")
+            {
+                ctx.Context.Response.Headers.CacheControl = "no-cache, no-store, must-revalidate";
+            }
+        }
+    });
 }
 
 // Session middleware. Must run before the endpoints so the gate wrappers above
@@ -227,9 +269,11 @@ app.MapGet("/health", () => Results.Ok(new { Status = "Healthy" }));
 // stale-cookie 401, so a user holding a dead cookie can still log back in.
 // ---------------------------------------------------------------------------
 
-// Mints a token, stores only its hash, and sets the cookie. No Secure flag:
-// everything runs over plain HTTP inside Tailscale (WireGuard already encrypts
-// it) - add Secure the day the droplet gets a `tailscale cert` HTTPS listener.
+// Mints a token, stores only its hash, and sets the cookie. Secure flag added
+// 2026-07-21 alongside the `tailscale serve` HTTPS cutover (webapp-pos-plan.md
+// Increment 0) - from this deploy on, webapp login only works from the HTTPS
+// *.ts.net origin; a browser silently drops a Secure cookie set over plain HTTP.
+// WinForms clients are unaffected - they never send this cookie at all.
 // SameSite=Strict is what makes CSRF a non-issue: the browser omits the cookie
 // on every cross-site request, and no CORS policy exists for a fetch to use.
 async Task IssueSessionAsync(NpgsqlConnection db, int userId, HttpContext http)
@@ -243,6 +287,7 @@ async Task IssueSessionAsync(NpgsqlConnection db, int userId, HttpContext http)
     http.Response.Cookies.Append(SessionCookieName, token, new CookieOptions
     {
         HttpOnly = true,
+        Secure = true,
         SameSite = SameSiteMode.Strict,
         Path = "/",
         MaxAge = TimeSpan.FromHours(SessionHours)
