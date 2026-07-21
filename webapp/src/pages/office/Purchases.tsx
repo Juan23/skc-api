@@ -81,6 +81,31 @@ export function Purchases() {
     setByPack(false)
   }
 
+  // Full reset of the entry form (not just the add-item bar): supplier, date, the
+  // accumulated draft lines and the retry tx id. Used when opening a fresh
+  // purchase and when closing/abandoning one, so a half-entered draft is never
+  // resurrected under a supplier/date the user has moved on from. Mirrors
+  // Deliveries' resetEntry.
+  function resetEntry() {
+    setSupplier('')
+    setDate(localDate())
+    setDraft([])
+    resetEntryBar()
+    txId.current = null
+    setError('')
+    setNotice('')
+  }
+
+  function openNew() {
+    resetEntry()
+    setEntryOpen(true)
+  }
+
+  function closeEntry() {
+    resetEntry()
+    setEntryOpen(false)
+  }
+
   function pick(p: InventoryRow) {
     setPicked(p)
     setByPack(false)
@@ -270,7 +295,7 @@ export function Purchases() {
       <h1>Purchases</h1>
 
       <div className="toolbar">
-        <button className="btn primary" onClick={() => setEntryOpen((v) => !v)} disabled={busy}>
+        <button className="btn primary" onClick={() => (entryOpen ? closeEntry() : openNew())} disabled={busy}>
           {entryOpen ? 'Close entry' : 'New purchase'}
         </button>
       </div>
