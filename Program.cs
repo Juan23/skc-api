@@ -180,6 +180,18 @@ bool IsTrustedBranchCaller(string branch, HttpContext http)
     return IsTrustedBranchIp(branch, http);
 }
 
+// Read gate for sales history/detail (the /api/sales GETs). Those rows carry per-sale revenue and
+// staff names, so they're readable by the office/owner (any branch - the office Branch Sales Report
+// and the webapp office/owner sales screens legitimately span all branches) OR by a branch's own
+// trusted devices (its own sales only) - never by one onboarded branch reading another's. Same
+// fail-open posture as the write gates: a branch absent from branchIps stays ungated (Gaisano/Liloy/
+// Labason keep working). Added 2026-07-22 for the cost/margin GET-exposure item in /bug-track.md.
+// Office/owner callers already run from trusted office/owner IPs, so they're unaffected; the one
+// behaviour change is that an Office/Owner-role session from an *untrusted* IP can no longer read
+// sales - matching how office *writes* are already IP-gated (both layers required).
+bool CanReadSales(string branch, HttpContext http) =>
+    IsTrustedOfficeCaller(http) || IsTrustedBranchCaller(branch, http);
+
 // Serve the built SPA (skc-api/webapp -> wwwroot) when it's present. Absent in a
 // bare source checkout, hence the guard - the API still runs API-only.
 if (Directory.Exists(Path.Combine(app.Environment.ContentRootPath, "wwwroot")))
@@ -1577,8 +1589,9 @@ app.MapPost("/api/sales", async (List<PosSaleDto> sales, HttpContext http) =>
 // Sales history for the office's Branch Sales Report. start/end are required (not
 // DateTime?) to sidestep the Npgsql nullable-DateTime type-inference bug documented
 // on /api/production above.
-app.MapGet("/api/sales", async (string branch, DateTime start, DateTime end) =>
+app.MapGet("/api/sales", async (string branch, DateTime start, DateTime end, HttpContext http) =>
 {
+    if (!CanReadSales(branch, http)) return Results.Problem("Sales history is restricted to the office, the owner, or the branch's own devices.", statusCode: 403);
     using var db = new NpgsqlConnection(connectionString);
     var sql = @"
         SELECT s.local_id AS LocalId, s.client_sale_id AS ClientSaleId, s.staff_name AS StaffName,
@@ -1591,8 +1604,9 @@ app.MapGet("/api/sales", async (string branch, DateTime start, DateTime end) =>
     return Results.Ok(await db.QueryAsync<PosSaleSummaryRow>(sql, new { branch, start, end }));
 });
 
-app.MapGet("/api/sales/{branch}/{clientSaleId}", async (string branch, string clientSaleId) =>
+app.MapGet("/api/sales/{branch}/{clientSaleId}", async (string branch, string clientSaleId, HttpContext http) =>
 {
+    if (!CanReadSales(branch, http)) return Results.Problem("Sales history is restricted to the office, the owner, or the branch's own devices.", statusCode: 403);
     using var db = new NpgsqlConnection(connectionString);
     var lines = (await db.QueryAsync<PosSaleLineRow>(@"
         SELECT sku AS SKU, description AS Description, qty AS Qty, unit_price AS UnitPrice,
@@ -1610,8 +1624,9 @@ app.MapGet("/api/sales/{branch}/{clientSaleId}", async (string branch, string cl
 // conflict with /api/sales/{branch}/{clientSaleId} - that one has three segments, this has two.
 // Voided sales are returned rather than filtered so the export can show them as reversed rather
 // than silently dropping rows the printed report accounts for.
-app.MapGet("/api/sales/lines", async (string branch, DateTime start, DateTime end) =>
+app.MapGet("/api/sales/lines", async (string branch, DateTime start, DateTime end, HttpContext http) =>
 {
+    if (!CanReadSales(branch, http)) return Results.Problem("Sales history is restricted to the office, the owner, or the branch's own devices.", statusCode: 403);
     using var db = new NpgsqlConnection(connectionString);
     var sql = @"
         SELECT s.local_id AS SaleNo, s.client_sale_id AS ClientSaleId, s.sold_at AS SoldAt,
