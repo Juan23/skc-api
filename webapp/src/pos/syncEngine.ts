@@ -30,7 +30,16 @@ function toWireDto(sale: PendingSale): PosSaleDto {
     clientSaleId: sale.clientSaleId,
     branch: sale.branch,
     staffName: sale.staffName,
-    soldAt: sale.soldAt,
+    // sale.soldAt is local wall-clock "YYYY-MM-DD HH:mm:ss" (a space, minted by
+    // localTimestamp). The server's PosSaleDto.SoldAt is a DateTime, and
+    // System.Text.Json only accepts ISO-8601 - a space separator fails to bind
+    // and 400s the WHOLE batch (every sale stuck 'pending' with a SYNC ERROR
+    // badge, not a per-sale Rejected). Send the 'T' form on the wire. No
+    // timezone suffix, so the server parses it Unspecified and stores the exact
+    // counter wall-clock into sold_at (timestamp without time zone) - matching
+    // "counter time, not sync time" with no offset shift. The locally-stored
+    // value keeps its space form; the day log's soldParts() reads either.
+    soldAt: sale.soldAt.replace(' ', 'T'),
     totalAmount: centavosToWireNumber(sale.totalCentavos),
     lines,
   }
