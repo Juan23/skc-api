@@ -138,7 +138,14 @@ export function DayReport({ branch }: { branch: string }) {
   }
 
   const periodLabel = loadedStart === loadedEnd ? loadedStart : `${loadedStart} to ${loadedEnd}`
-  const nothing = rows != null && rows.length === 0
+  // Disable Print/Export whenever there's nothing loaded to act on - both the
+  // empty-range case AND the never-successfully-loaded case (rows === null, e.g.
+  // the very first load threw because network AND local IndexedDB both failed).
+  // The old `rows != null && ...` left rows===null as "not nothing", so Export
+  // stayed enabled and would fire fetchSaleLines with blank loadedStart/End
+  // (a malformed 'end=T23:59:59' query) surfaced as a misleading connectivity
+  // error. Print already no-ops on !rows, but the disabled state should match.
+  const nothing = rows == null || rows.length === 0
 
   return (
     <div className="pos-report">

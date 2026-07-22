@@ -146,6 +146,27 @@ export async function reconcileWithServer(branch: string): Promise<DayLogEntry[]
   return sortNewestFirst([...byId.values()])
 }
 
+// Dismiss a terminally-rejected sale: delete its row from pendingSales so it
+// stops counting toward the sync badge's pending total and its 'sync-error'
+// status (syncEngine.refreshPendingCount counts errored rows). The server
+// rejected the sale outright (that's exactly what syncState 'error' means), so
+// this local row is a record of a sale that was NEVER recorded server-side -
+// removing it un-sells nothing. Guarded to fire ONLY on an errored row of this
+// branch: it can never delete a still-syncable ('pending') sale, so a queued
+// sale awaiting sync is safe. Returns true iff a row was actually removed.
+export async function dismissRejectedSale(branch: string, clientSaleId: string): Promise<boolean> {
+  const db = await getDb()
+  const tx = db.transaction('pendingSales', 'readwrite')
+  const row = await tx.store.get(clientSaleId)
+  if (!row || row.branch !== branch || row.syncState !== 'error') {
+    await tx.done
+    return false
+  }
+  await tx.store.delete(clientSaleId)
+  await tx.done
+  return true
+}
+
 export type VoidResult = 'voided' | 'not-synced' | 'forbidden' | 'offline' | 'error'
 
 function classifyVoidError(err: unknown): VoidResult {

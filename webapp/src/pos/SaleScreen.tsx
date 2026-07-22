@@ -295,8 +295,19 @@ export function SaleScreen({ catalog, onComplete }: Props) {
   const [lastSale, setLastSale] = useState<{ total: number; change: number | null } | null>(null)
 
   const hasSellableLine = cart.lines.some((l) => l.sku != null)
+  // Short payment = cash was entered AND it's less than the total. Block it so a
+  // sale can't be completed for more than the cashier collected. Entering NO
+  // cash (tendered null) stays allowed - the counter often doesn't track tender
+  // per sale, and forcing it on every sale is a bigger change than asked for;
+  // this only stops the affirmatively-short case.
+  const shortPayment = cart.tenderedCentavos != null && cart.tenderedCentavos < cart.totalCentavos
   const canComplete =
-    !!onComplete && !completing && cart.staffName.trim() !== '' && hasSellableLine && cart.totalCentavos >= 0
+    !!onComplete &&
+    !completing &&
+    cart.staffName.trim() !== '' &&
+    hasSellableLine &&
+    cart.totalCentavos >= 0 &&
+    !shortPayment
 
   async function complete() {
     if (!onComplete || !canComplete) return
@@ -493,6 +504,10 @@ export function SaleScreen({ catalog, onComplete }: Props) {
               <span className="pos-total-label">Change</span>
               <span className="pos-change-value">{formatCentavos(cart.changeCentavos)}</span>
             </div>
+          )}
+
+          {shortPayment && (
+            <p className="error">Cash received is less than the total — enter the full amount to complete the sale.</p>
           )}
 
           <button

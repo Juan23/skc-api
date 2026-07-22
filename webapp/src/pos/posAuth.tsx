@@ -190,6 +190,16 @@ export function PosAuthProvider({ children }: { children: ReactNode }) {
           `This till is set up for ${current.branchName}. Sign in with a ${current.branchName} account, not ${fresh.branchName}.`,
         )
       }
+      // Neuter any still-in-flight mount check() the same way logout() does.
+      // On a fresh/unprovisioned till the mount probe fires /api/auth/me with no
+      // cookie; if the operator submits this login form while that probe is
+      // still in flight, the probe typically settles as a 401 AFTER we've
+      // succeeded here and would then clobber us back to 'signin-required' (the
+      // "Session expired" overlay over a till that just logged in). Its adopt/
+      // clobber paths all bail on cancelledRef, and check() only ever runs once
+      // at mount, so setting it here is safe and permanent. (Harmless in the
+      // mid-shift overlay case: check() has long since finished by then.)
+      cancelledRef.current = true
       setIdentity(fresh)
       try {
         // Cache the identity AND clear the sign-out sentinel atomically: an

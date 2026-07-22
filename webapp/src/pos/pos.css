@@ -791,6 +791,24 @@
   margin-top: 12px;
 }
 
+.pos-daylog-rejected {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+/* The rejected-sale message/confirm already carry their own top margin; inside
+   the flex column that would double up, so neutralise it here. */
+.pos-daylog-rejected .error,
+.pos-daylog-rejected .pos-daylog-confirm {
+  margin-top: 0;
+}
+
+.pos-daylog-dismiss {
+  align-self: flex-start;
+}
+
 .pos-daylog-confirm {
   margin-top: 12px;
 }

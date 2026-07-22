@@ -163,7 +163,9 @@ function PosInner() {
       <div style={{ display: view === 'sell' ? 'contents' : 'none' }}>
         <SaleScreen catalog={catalog} onComplete={handleComplete} />
       </div>
-      {view === 'daylog' && branchName && <DayLog branch={branchName} voidedBy={auth.identity?.username ?? ''} />}
+      {view === 'daylog' && branchName && (
+        <DayLog branch={branchName} voidedBy={auth.identity?.username ?? ''} onChanged={sync.triggerSync} />
+      )}
       {view === 'report' && branchName && <DayReport branch={branchName} />}
     </div>
   )
