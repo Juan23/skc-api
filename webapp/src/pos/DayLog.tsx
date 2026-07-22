@@ -7,6 +7,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { formatCentavos } from './money'
 import type { DayLogEntry, DayLogStatus, VoidResult } from './dayLogStore'
 import { loadTodayLocal, reconcileWithServer, voidSale } from './dayLogStore'
+import { usePosAuth } from './posAuth'
 
 // soldAt is 'YYYY-MM-DD HH:mm:ss' for locally-rung sales (localTimestamp mints a
 // space separator) but ISO 'YYYY-MM-DDTHH:mm:ss' for sales merged in from the
@@ -45,11 +46,14 @@ function voidMessage(result: VoidResult): string {
 }
 
 export function DayLog({ branch, voidedBy }: { branch: string; voidedBy: string }) {
+  const auth = usePosAuth()
   const [entries, setEntries] = useState<DayLogEntry[] | null>(null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [confirming, setConfirming] = useState(false)
   const [voiding, setVoiding] = useState(false)
   const [message, setMessage] = useState('')
+  const [signingOut, setSigningOut] = useState(false)
+  const [signoutBusy, setSignoutBusy] = useState(false)
 
   const load = useCallback(async () => {
     // Local first so the list appears instantly and works fully offline, then
@@ -82,6 +86,14 @@ export function DayLog({ branch, voidedBy }: { branch: string; voidedBy: string 
     setMessage('')
   }
 
+  async function doSignOut() {
+    // On success (or offline), logout() sets identity to null, which unmounts
+    // this component via PosInner's ProvisionScreen switch - so there's no
+    // setState-after-unmount to reset; disabling the buttons is enough.
+    setSignoutBusy(true)
+    await auth.logout()
+  }
+
   async function doVoid() {
     if (!selected) return
     setVoiding(true)
@@ -100,7 +112,14 @@ export function DayLog({ branch, voidedBy }: { branch: string; voidedBy: string 
     <div className="pos-daylog">
       <div className="pos-daylog-list">
         <div className="pos-daylog-head">
-          <h1>Today&rsquo;s sales</h1>
+          <div className="pos-daylog-head-top">
+            <h1>Today&rsquo;s sales</h1>
+            {!signingOut && (
+              <button type="button" className="pos-signout-link" onClick={() => setSigningOut(true)}>
+                Sign out
+              </button>
+            )}
+          </div>
           <div className="pos-daylog-takings">
             <span>{peso(takings)}</span>
             <small>
@@ -108,6 +127,28 @@ export function DayLog({ branch, voidedBy }: { branch: string; voidedBy: string 
             </small>
           </div>
         </div>
+
+        {signingOut && (
+          <div className="pos-signout-confirm">
+            <p>
+              Sign out and set this till up again? Any sales still waiting to sync stay saved and keep syncing on their
+              own.
+            </p>
+            <div className="pos-daylog-confirm-btns">
+              <button type="button" className="btn destructive" onClick={() => void doSignOut()} disabled={signoutBusy}>
+                {signoutBusy ? 'Signing out…' : 'Sign out'}
+              </button>
+              <button
+                type="button"
+                className="btn neutral"
+                onClick={() => setSigningOut(false)}
+                disabled={signoutBusy}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
 
         {entries == null ? (
           <p className="pos-daylog-empty">Loading&hellip;</p>

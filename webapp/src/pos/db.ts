@@ -131,3 +131,28 @@ export async function setMeta(key: string, value: unknown): Promise<void> {
   const db = await getDb()
   await db.put('meta', { key, value })
 }
+
+// Atomically set the signed-out sentinel AND forget the cached identity in a
+// SINGLE meta transaction. Doing these as two separate awaited writes risks a
+// partial state (sentinel set, identity still cached) that the POS mount check
+// would misread as "still provisioned" and silently re-adopt from a valid
+// cookie - see posAuth's logout(). One transaction commits both or neither.
+// The request promises are awaited alongside tx.done via Promise.all so a
+// failing request surfaces as a rejection (caught by the caller) rather than a
+// bare unhandled rejection.
+export async function signOutMeta(signedOutKey: string, identityKey: string): Promise<void> {
+  const db = await getDb()
+  const tx = db.transaction('meta', 'readwrite')
+  await Promise.all([tx.store.put({ key: signedOutKey, value: true }), tx.store.delete(identityKey), tx.done])
+}
+
+// The provisioning counterpart: atomically cache the identity AND clear the
+// signed-out sentinel in one transaction, so an explicit login can't leave the
+// "identity cached but sentinel still true" partial state (which the mount
+// check treats sentinel-first, bouncing the freshly-logged-in till back to the
+// setup screen on next reload). One transaction commits both or neither.
+export async function provisionMeta(identityKey: string, identity: unknown, signedOutKey: string): Promise<void> {
+  const db = await getDb()
+  const tx = db.transaction('meta', 'readwrite')
+  await Promise.all([tx.store.put({ key: identityKey, value: identity }), tx.store.delete(signedOutKey), tx.done])
+}
