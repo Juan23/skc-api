@@ -180,16 +180,18 @@ bool IsTrustedBranchCaller(string branch, HttpContext http)
     return IsTrustedBranchIp(branch, http);
 }
 
-// Read gate for sales history/detail (the /api/sales GETs). Those rows carry per-sale revenue and
-// staff names, so they're readable by the office/owner (any branch - the office Branch Sales Report
-// and the webapp office/owner sales screens legitimately span all branches) OR by a branch's own
-// trusted devices (its own sales only) - never by one onboarded branch reading another's. Same
-// fail-open posture as the write gates: a branch absent from branchIps stays ungated (Gaisano/Liloy/
-// Labason keep working). Added 2026-07-22 for the cost/margin GET-exposure item in /bug-track.md.
-// Office/owner callers already run from trusted office/owner IPs, so they're unaffected; the one
-// behaviour change is that an Office/Owner-role session from an *untrusted* IP can no longer read
-// sales - matching how office *writes* are already IP-gated (both layers required).
-bool CanReadSales(string branch, HttpContext http) =>
+// Read gate for branch-scoped history that carries owner-confidential cost/revenue/staff data - the
+// /api/sales GETs, /api/production, /api/deliveries/pending, and (via its ticket's DB to_branch)
+// /api/deliveries/{id}. Readable by the office/owner (any branch - the office reports and the webapp
+// office/owner screens legitimately span all branches) OR by a branch's own trusted devices (its own
+// branch only) - never by one onboarded branch reading another's. Same fail-open posture as the write
+// gates: a branch absent from branchIps stays ungated (Gaisano/Liloy/Labason keep working). Added
+// 2026-07-22 for the cost/margin GET-exposure item in /bug-track.md. Office/owner callers run from
+// trusted office/owner IPs so they're unaffected; the one behaviour change is that an Office/Owner-
+// role session from an *untrusted* IP can no longer read this data - matching how office *writes*
+// are already IP-gated (both layers required). The office-ONLY cost views (purchases, delivery
+// tickets/daily, adjustments) use IsTrustedOfficeCaller directly instead - no branch ever reads them.
+bool CanReadBranchScoped(string branch, HttpContext http) =>
     IsTrustedOfficeCaller(http) || IsTrustedBranchCaller(branch, http);
 
 // Serve the built SPA (skc-api/webapp -> wwwroot) when it's present. Absent in a
@@ -747,14 +749,16 @@ app.MapPost("/api/deliveries", async (List<DeliveryLogDto> deliveries, HttpConte
 });
 
 // --- HISTORY & VIEW ENDPOINTS ---
-app.MapGet("/api/purchases/tickets", async (DateTime start, DateTime end) => {
+app.MapGet("/api/purchases/tickets", async (DateTime start, DateTime end, HttpContext http) => {
+    if (!IsTrustedOfficeCaller(http)) return Results.Problem("This endpoint is restricted to trusted office devices.", statusCode: 403);
     using var db = new NpgsqlConnection(connectionString);
-    var sql = @"SELECT transaction_id AS TransactionId, date AS Date, supplier AS Supplier, SUM(qty * unit_cost) AS TotalAmount 
+    var sql = @"SELECT transaction_id AS TransactionId, date AS Date, supplier AS Supplier, SUM(qty * unit_cost) AS TotalAmount
                 FROM purchase_logs WHERE date >= @start AND date <= @end GROUP BY transaction_id, date, supplier ORDER BY date DESC";
     return Results.Ok(await db.QueryAsync<PurchaseTicketSummary>(sql, new { start, end }));
 });
 
-app.MapGet("/api/purchases/{id}", async (string id) => {
+app.MapGet("/api/purchases/{id}", async (string id, HttpContext http) => {
+    if (!IsTrustedOfficeCaller(http)) return Results.Problem("This endpoint is restricted to trusted office devices.", statusCode: 403);
     using var db = new NpgsqlConnection(connectionString);
     return Results.Ok(await db.QueryAsync<PurchaseLog>("SELECT transaction_id AS TransactionId, date AS Date, sku AS SKU, qty AS Qty, unit_cost AS UnitCost, supplier AS Supplier FROM purchase_logs WHERE transaction_id = @id", new { id }));
 });
@@ -797,7 +801,8 @@ app.MapDelete("/api/purchases/{id}", async (string id, HttpContext http) => {
     catch (Exception ex) { await tx.RollbackAsync(); return Results.Problem(ex.Message); }
 });
 
-app.MapGet("/api/deliveries/tickets", async (DateTime start, DateTime end) => {
+app.MapGet("/api/deliveries/tickets", async (DateTime start, DateTime end, HttpContext http) => {
+    if (!IsTrustedOfficeCaller(http)) return Results.Problem("This endpoint is restricted to trusted office devices.", statusCode: 403);
     using var db = new NpgsqlConnection(connectionString);
     // Compare on ::date, not the raw timestamp: delivery_logs.date carries a time component
     // (Delivery.cs stamps DateTime.Now), so a plain `date <= @end` with a date-only end (midnight)
@@ -810,9 +815,16 @@ app.MapGet("/api/deliveries/tickets", async (DateTime start, DateTime end) => {
     return Results.Ok(await db.QueryAsync<DeliveryTicketSummary>(sql, new { start, end }));
 });
 
-app.MapGet("/api/deliveries/{id}", async (string id) => {
+app.MapGet("/api/deliveries/{id}", async (string id, HttpContext http) => {
     using var db = new NpgsqlConnection(connectionString);
-    return Results.Ok(await db.QueryAsync<DeliveryLog>("SELECT transaction_id AS TransactionId, date AS Date, sku AS SKU, qty AS Qty, to_branch AS ToBranch, total_line_cost AS TotalLineCost, requester AS Requester, reason AS Reason FROM delivery_logs WHERE transaction_id = @id", new { id }));
+    var rows = (await db.QueryAsync<DeliveryLog>("SELECT transaction_id AS TransactionId, date AS Date, sku AS SKU, qty AS Qty, to_branch AS ToBranch, total_line_cost AS TotalLineCost, requester AS Requester, reason AS Reason FROM delivery_logs WHERE transaction_id = @id", new { id })).ToList();
+    // Gate on the ticket's DB-verified destination branch (like /accept - never a client-asserted
+    // one, which would leak to_branch off a mismatch): office/owner may read any ticket, a branch
+    // device only tickets bound for itself. An empty result (unknown id) has no branch to protect,
+    // so it returns [] to anyone - no data, no leak, and no way to probe another branch's ids.
+    if (rows.Count > 0 && !CanReadBranchScoped(rows[0].ToBranch, http))
+        return Results.Problem("This delivery is restricted to the office, the owner, or the destination branch's own devices.", statusCode: 403);
+    return Results.Ok(rows);
 });
 
 app.MapDelete("/api/deliveries/{id}", async (string id, HttpContext http) => {
@@ -858,7 +870,8 @@ app.MapDelete("/api/deliveries/{id}", async (string id, HttpContext http) => {
     catch (Exception ex) { await tx.RollbackAsync(); return Results.Problem(ex.Message); }
 });
 
-app.MapGet("/api/deliveries/daily", async (DateTime targetDate) => {
+app.MapGet("/api/deliveries/daily", async (DateTime targetDate, HttpContext http) => {
+    if (!IsTrustedOfficeCaller(http)) return Results.Problem("This endpoint is restricted to trusted office devices.", statusCode: 403);
     using var db = new NpgsqlConnection(connectionString);
     var sql = @"SELECT d.transaction_id AS TransactionId, d.to_branch AS ToBranch, d.requester AS Requester, d.reason AS Reason, d.sku AS SKU, i.base_name AS BaseName, i.brand AS Brand, d.qty AS Qty, d.total_line_cost AS TotalLineCost 
                 FROM delivery_logs d LEFT JOIN inventory i ON d.sku = i.sku 
@@ -868,7 +881,8 @@ app.MapGet("/api/deliveries/daily", async (DateTime targetDate) => {
 
 // --- BRANCH ACCEPTANCE WORKFLOW ---
 
-app.MapGet("/api/deliveries/pending", async (string branch) => {
+app.MapGet("/api/deliveries/pending", async (string branch, HttpContext http) => {
+    if (!CanReadBranchScoped(branch, http)) return Results.Problem("Pending deliveries are restricted to the office, the owner, or the branch's own devices.", statusCode: 403);
     using var db = new NpgsqlConnection(connectionString);
     var sql = @"SELECT transaction_id AS TransactionId, date AS Date, to_branch AS ToBranch, SUM(qty) AS TotalItems,
                        MAX(requester) AS Requester, MAX(reason) AS Reason, SUM(total_line_cost) AS TotalCost,
@@ -1178,8 +1192,9 @@ app.MapPost("/api/inventory/{sku}/adjust", async (string sku, AdjustInventoryDto
     }
 });
 
-app.MapGet("/api/inventory/adjustments", async (DateTime start, DateTime end, string? branch) =>
+app.MapGet("/api/inventory/adjustments", async (DateTime start, DateTime end, string? branch, HttpContext http) =>
 {
+    if (!IsTrustedOfficeCaller(http)) return Results.Problem("This endpoint is restricted to trusted office devices.", statusCode: 403);
     using var db = new NpgsqlConnection(connectionString);
     var sql = @"
         SELECT a.date AS Date, a.sku AS SKU, i.brand AS Brand, i.base_name AS BaseName,
@@ -1431,8 +1446,9 @@ app.MapPost("/api/production", async (ProductionDto dto, HttpContext http) =>
     catch (Exception ex) { await tx.RollbackAsync(); return Results.Problem(ex.Message); }
 });
 
-app.MapGet("/api/production", async (string branch, DateTime? start, DateTime? end) =>
+app.MapGet("/api/production", async (string branch, DateTime? start, DateTime? end, HttpContext http) =>
 {
+    if (!CanReadBranchScoped(branch, http)) return Results.Problem("Production history is restricted to the office, the owner, or the branch's own devices.", statusCode: 403);
     using var db = new NpgsqlConnection(connectionString);
     var sql = @"
         SELECT p.transaction_id AS TransactionId, p.date AS Date, p.recipe_id AS RecipeId, r.name AS RecipeName,
@@ -1591,7 +1607,7 @@ app.MapPost("/api/sales", async (List<PosSaleDto> sales, HttpContext http) =>
 // on /api/production above.
 app.MapGet("/api/sales", async (string branch, DateTime start, DateTime end, HttpContext http) =>
 {
-    if (!CanReadSales(branch, http)) return Results.Problem("Sales history is restricted to the office, the owner, or the branch's own devices.", statusCode: 403);
+    if (!CanReadBranchScoped(branch, http)) return Results.Problem("Sales history is restricted to the office, the owner, or the branch's own devices.", statusCode: 403);
     using var db = new NpgsqlConnection(connectionString);
     var sql = @"
         SELECT s.local_id AS LocalId, s.client_sale_id AS ClientSaleId, s.staff_name AS StaffName,
@@ -1606,7 +1622,7 @@ app.MapGet("/api/sales", async (string branch, DateTime start, DateTime end, Htt
 
 app.MapGet("/api/sales/{branch}/{clientSaleId}", async (string branch, string clientSaleId, HttpContext http) =>
 {
-    if (!CanReadSales(branch, http)) return Results.Problem("Sales history is restricted to the office, the owner, or the branch's own devices.", statusCode: 403);
+    if (!CanReadBranchScoped(branch, http)) return Results.Problem("Sales history is restricted to the office, the owner, or the branch's own devices.", statusCode: 403);
     using var db = new NpgsqlConnection(connectionString);
     var lines = (await db.QueryAsync<PosSaleLineRow>(@"
         SELECT sku AS SKU, description AS Description, qty AS Qty, unit_price AS UnitPrice,
@@ -1626,7 +1642,7 @@ app.MapGet("/api/sales/{branch}/{clientSaleId}", async (string branch, string cl
 // than silently dropping rows the printed report accounts for.
 app.MapGet("/api/sales/lines", async (string branch, DateTime start, DateTime end, HttpContext http) =>
 {
-    if (!CanReadSales(branch, http)) return Results.Problem("Sales history is restricted to the office, the owner, or the branch's own devices.", statusCode: 403);
+    if (!CanReadBranchScoped(branch, http)) return Results.Problem("Sales history is restricted to the office, the owner, or the branch's own devices.", statusCode: 403);
     using var db = new NpgsqlConnection(connectionString);
     var sql = @"
         SELECT s.local_id AS SaleNo, s.client_sale_id AS ClientSaleId, s.sold_at AS SoldAt,
