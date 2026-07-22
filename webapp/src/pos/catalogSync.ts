@@ -19,6 +19,14 @@ function isSellable(row: InventoryRow): boolean {
 export interface CatalogPullResult {
   ok: boolean
   count: number
+  // Why a pull didn't apply (only set when ok === false), so callers can tell a
+  // genuine connectivity/server failure apart from a perfectly healthy server
+  // that simply has nothing sellable yet (e.g. a branch before the owner has
+  // priced anything). The sync-status badge must NOT show "offline" for the
+  // latter - the server was reached fine.
+  //   'error' - fetch threw, a non-2xx ApiError, or a malformed response.
+  //   'empty' - a well-formed response that filtered down to zero sellable.
+  reason?: 'error' | 'empty'
 }
 
 // Empty pull -> keep last-good (webapp-pos-plan.md §1): a blank pull is a bad
@@ -42,13 +50,13 @@ export async function pullCatalog(branch: string): Promise<CatalogPullResult> {
     } else {
       console.warn('[pos] Catalog pull failed (offline or malformed response):', err)
     }
-    return { ok: false, count: await getCatalogCount() }
+    return { ok: false, count: await getCatalogCount(), reason: 'error' }
   }
 
   const sellable = rows.filter(isSellable)
   if (sellable.length === 0) {
     console.warn('[pos] Catalog pull returned nothing sellable - keeping last-good catalog.')
-    return { ok: false, count: await getCatalogCount() }
+    return { ok: false, count: await getCatalogCount(), reason: 'empty' }
   }
 
   // One transaction across both stores so the catalog and its bookkeeping
