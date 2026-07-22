@@ -13,31 +13,28 @@ import { PosAuthProvider, usePosAuth } from './posAuth'
 import { PosStatusBadge } from './PosStatusBadge'
 import { usePosSync } from './syncEngine'
 import { DayLog } from './DayLog'
+import { DayReport } from './DayReport'
 import './pos.css'
 
-type PosView = 'sell' | 'daylog'
+type PosView = 'sell' | 'daylog' | 'report'
 
 function PosNav({ view, onChange }: { view: PosView; onChange: (v: PosView) => void }) {
+  const tab = (v: PosView, label: string) => (
+    <button
+      type="button"
+      role="tab"
+      aria-selected={view === v}
+      className={`pos-nav-btn${view === v ? ' active' : ''}`}
+      onClick={() => onChange(v)}
+    >
+      {label}
+    </button>
+  )
   return (
     <div className="pos-nav" role="tablist" aria-label="POS views">
-      <button
-        type="button"
-        role="tab"
-        aria-selected={view === 'sell'}
-        className={`pos-nav-btn${view === 'sell' ? ' active' : ''}`}
-        onClick={() => onChange('sell')}
-      >
-        Sell
-      </button>
-      <button
-        type="button"
-        role="tab"
-        aria-selected={view === 'daylog'}
-        className={`pos-nav-btn${view === 'daylog' ? ' active' : ''}`}
-        onClick={() => onChange('daylog')}
-      >
-        Today&rsquo;s sales
-      </button>
+      {tab('sell', 'Sell')}
+      {tab('daylog', "Today's sales")}
+      {tab('report', 'Report')}
     </div>
   )
 }
@@ -167,6 +164,7 @@ function PosInner() {
         <SaleScreen catalog={catalog} onComplete={handleComplete} />
       </div>
       {view === 'daylog' && branchName && <DayLog branch={branchName} voidedBy={auth.identity?.username ?? ''} />}
+      {view === 'report' && branchName && <DayReport branch={branchName} />}
     </div>
   )
 }
