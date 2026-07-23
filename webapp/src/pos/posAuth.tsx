@@ -91,6 +91,10 @@ export function PosAuthProvider({ children }: { children: ReactNode }) {
   // branch, which the effect below may have set after login()'s closure formed.
   const identityRef = useRef<PosIdentity | null | undefined>(identity)
   identityRef.current = identity
+  // Same pattern, for the reconnect handler below to read live mode without
+  // re-subscribing its listener on every mode change.
+  const modeRef = useRef<PosAuthMode>(mode)
+  modeRef.current = mode
 
   async function check() {
     const [cached, signedOut] = await Promise.all([readCached(), readSignedOut()])
@@ -163,6 +167,69 @@ export function PosAuthProvider({ children }: { children: ReactNode }) {
       cancelledRef.current = true
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Recover from a stale 'offline' authMode once the browser says connectivity
+  // is back - mirrors syncEngine.ts's own 'online' listener (added for the
+  // same reason: the 60s poll is only a worst-case ceiling). Without this,
+  // authMode is a one-shot mount-time snapshot with no way back: if check()
+  // ever failed to reach the server (a genuine outage, or a reload that
+  // happened to land offline), the badge is stuck reporting OFFLINE forever -
+  // even after syncEngine has reconnected and is syncing sales again - until
+  // the next full page reload. Found via a Playwright offline/reconnect test:
+  // IndexedDB showed the sale had genuinely synced (pendingSales: 0), but the
+  // badge still read OFFLINE. Deliberately independent of check()/cancelledRef
+  // above: cancelledRef is permanently tripped by a successful login() (so the
+  // original in-flight mount probe can't clobber it), which would silently
+  // neuter this handler too for the rest of the till's session if it reused
+  // that same flag - exactly the common case (a provisioned till reconnecting
+  // after a login already happened).
+  useEffect(() => {
+    let cancelled = false
+    async function onOnline() {
+      // Only relevant when we currently believe we're offline - leave
+      // 'online' alone (nothing to do) and 'signin-required' alone (a real
+      // 401 needs a fresh login, not just connectivity; re-probing here could
+      // otherwise flip it back to a misleading 'online' on a stale cookie
+      // race).
+      if (modeRef.current !== 'offline') return
+      try {
+        const user = await api.get<CurrentUser>('/api/auth/me')
+        if (cancelled) return
+        const fresh = toIdentity(user)
+        const current = identityRef.current
+        if (fresh && (!current || fresh.branchName === current.branchName)) {
+          setIdentity(fresh)
+          try {
+            await setMeta(META_KEY, fresh)
+          } catch {
+            /* persist best-effort; identity is already live in memory */
+          }
+          setMode('online')
+        } else {
+          // Reachable, but no usable Branch identity for this till (a
+          // different branch's session, or a non-Branch account) - same
+          // "keep the till's identity, prompt a re-login" outcome check()
+          // uses for the equivalent case.
+          setMode('signin-required')
+        }
+      } catch (err) {
+        if (cancelled) return
+        if (err instanceof ApiError && err.status === 401) {
+          setMode('signin-required')
+        }
+        // Any other error: still can't actually reach the server despite the
+        // browser's 'online' event (a false-positive network signal, or the
+        // server itself is down) - leave mode as 'offline'. The next 'online'
+        // event, a rung sale's sync trigger, or a reload will try again.
+      }
+    }
+    const handler = () => void onOnline()
+    window.addEventListener('online', handler)
+    return () => {
+      cancelled = true
+      window.removeEventListener('online', handler)
+    }
   }, [])
 
   // A deliberate, explicit credential entry (provisioning a new till, or the

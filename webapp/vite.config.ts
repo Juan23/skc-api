@@ -24,13 +24,30 @@ export default defineConfig({
       // Registration scope, NOT the manifest's own `scope` below (a separate,
       // install-window-navigation concept). The POS is meant to be a standalone
       // instance that doesn't touch the rest of the app (see webapp-pos-plan.md
-      // decision #2) - narrowing this to /pos/ means the service worker never
-      // controls /office, /owner, /branch, or /login navigations, so a future
-      // webapp deploy still lands on their next refresh exactly as documented
-      // in CLAUDE.md. Valid even though sw.js is served from site root: a
+      // decision #2) - narrowing this means the service worker never controls
+      // /office, /owner, /branch, or /login navigations, so a future webapp
+      // deploy still lands on their next refresh exactly as documented in
+      // CLAUDE.md. Valid even though sw.js is served from site root: a
       // registration scope narrower than the script's own directory needs no
       // Service-Worker-Allowed header, only a wider one would.
-      scope: '/pos/',
+      //
+      // MUST be '/pos', not '/pos/'. Scope matching is a raw string-prefix
+      // check on the URL, not path-boundary-aware - but the app's actual URL
+      // (the router's <Route path="/pos">, the manifest start_url below, every
+      // link to the till) never carries a trailing slash. A '/pos/' scope
+      // therefore never matches it: navigator.serviceWorker.controller stays
+      // null on the real page, and the one thing this service worker exists
+      // for - navigateFallback serving the app shell on an offline reload -
+      // silently never engages. (Found via a Playwright offline-reload test:
+      // `serviceWorker.controller` was null on /pos, set once trailing-slash
+      // /pos/ was loaded directly - the registration itself was fine, only the
+      // scope-to-URL match was wrong.) Trade-off accepted: '/pos' as a raw
+      // prefix would also match a hypothetical future '/postal' route, but no
+      // such route exists, and any route it did over-match would just get the
+      // same navigateFallback app-shell behavior every unmatched SPA path
+      // already gets - not a security issue like the IsTrustedOfficeCaller-
+      // style prefix bugs this codebase has fixed elsewhere.
+      scope: '/pos',
       // globPatterns below already precaches every public/*.png (icons
       // included) - without this the manifest icons get added a second time
       // as duplicate precache entries. webmanifest is excluded from
