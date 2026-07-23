@@ -44,15 +44,15 @@ test('create a multi-output recipe through the owner UI', async ({ page }) => {
 
   // Row 0 (present by default): 8-inch, weight 40.
   await page.getByLabel('Product').nth(0).selectOption('zz-choc-8')
-  await page.getByLabel('Weight').nth(0).fill('40')
+  await page.getByLabel('Size').nth(0).fill('40')
   // Add row 1: 10-inch, weight 60.
   await page.getByRole('button', { name: /add output/i }).click()
   await page.getByLabel('Product').nth(1).selectOption('zz-choc-10')
-  await page.getByLabel('Weight').nth(1).fill('60')
+  await page.getByLabel('Size').nth(1).fill('60')
   // Add row 2: cupcake, weight 2.
   await page.getByRole('button', { name: /add output/i }).click()
   await page.getByLabel('Product').nth(2).selectOption('zz-cupcake')
-  await page.getByLabel('Weight').nth(2).fill('2')
+  await page.getByLabel('Size').nth(2).fill('2')
 
   // One ingredient line (zz-flour, 500).
   await page.getByLabel('Ingredient').first().selectOption('zz-flour')

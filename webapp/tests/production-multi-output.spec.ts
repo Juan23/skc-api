@@ -55,11 +55,13 @@ test('record a multi-output bake and see it in history', async ({ page }) => {
   // --- record it ---
   await page.getByRole('button', { name: /record batch/i }).click()
 
-  // Success notice lists BOTH outputs.
+  // Success notice lists BOTH outputs by display name + per-unit cost (e.g.
+  // "4 × ZZ Test Moist Choc 8in @ 232.56"), matching the history table below -
+  // not the raw output SKU it used to print.
   const notice = page.locator('.notice')
   await expect(notice).toContainText(/Recorded/i)
-  await expect(notice).toContainText(/zz-choc-8/)
-  await expect(notice).toContainText(/zz-cupcake/)
+  await expect(notice).toContainText(/Choc 8in @/)
+  await expect(notice).toContainText(/Cupcake @/)
 
   // History table below shows the batch with both outputs stacked in one Made
   // cell (rendered by display name, not SKU). The newest batch is the top row.

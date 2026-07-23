@@ -137,8 +137,11 @@ export function ProductionHistory() {
         outputs,
         transactionId: txId.current,
       })
+      // Name + per-unit cost, matching the history table right below (which
+      // shows "4 × Choc 8in @ 232.56"): a raw SKU with no cost read as cryptic
+      // next to it, and the server already hands back the resolved unit cost.
       const made = result.outputs.length
-        ? result.outputs.map((o) => `${formatQty(o.qty)} × ${o.outputSku}`).join(', ')
+        ? result.outputs.map((o) => `${formatQty(o.qty)} × ${stockName(o.outputSku)} @ ${formatMoney(o.unitCost)}`).join(', ')
         : 'nothing (recorded loss)'
       setNotice(`Recorded. Produced ${made} (ingredient cost ${formatMoney(result.totalInputCost)}).`)
       txId.current = null
@@ -204,7 +207,7 @@ export function ProductionHistory() {
               </select>
             </label>
             <label className="inline">
-              Batch multiplier
+              Batches
               <input
                 type="number"
                 min={0}
@@ -218,13 +221,21 @@ export function ProductionHistory() {
               <input value={staff} onChange={(e) => setStaff(e.target.value)} placeholder="Staff name" />
             </label>
           </div>
+          <p className="muted" style={{ marginTop: 4 }}>
+            <strong>Batches</strong> scales the ingredients — 1 = one full recipe. It's separate from
+            the counts below (what you actually made).
+          </p>
 
-          {recipe && (
+          {/* The output labels are product names resolved from the catalog; hold
+              the section until it loads rather than flash raw SKUs (zz-choc-8…). */}
+          {recipe && !catalog.data && <p className="muted">Loading products…</p>}
+          {recipe && catalog.data && (
             <>
               <h3>What did you make?</h3>
               <p className="muted">
-                Enter how many of each type this batch produced — leave a type at 0 if you didn't
-                make it. The ingredient cost splits across whatever you made, by relative size.
+                These are the actual items produced — leave a type at 0 if you didn't make it. They
+                split the ingredient cost by size. The ingredients used come from the batches number
+                above, not from these counts.
               </p>
               <div className="toolbar" style={{ flexWrap: 'wrap' }}>
                 {recipe.outputs.map((o) => (
@@ -249,6 +260,7 @@ export function ProductionHistory() {
           {recipe && preview.length > 0 && (
             <>
               <h3>Ingredients this batch will use</h3>
+              <p className="muted">Based on the number of batches — not the counts above.</p>
               <div className="table-wrap">
                 <table className="data">
                   <thead>

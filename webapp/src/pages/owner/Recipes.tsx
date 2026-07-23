@@ -286,9 +286,10 @@ export function Recipes() {
             <h3>Can make</h3>
             <p className="muted">
               The finished-good types this one recipe can produce. The baker picks which ones and
-              how many at production time. <strong>Weight</strong> is relative size (e.g. 8-inch=40,
-              cupcake=2, mini=1) — it splits a batch's ingredient cost across whatever was made,
-              proportional to qty × weight. With a single output the weight doesn't matter.
+              how many at production time. <strong>Size</strong> is a relative number (e.g.
+              8-inch=40, cupcake=2, mini=1), <em>not</em> grams — it splits a batch's ingredient cost
+              across whatever was made, proportional to qty × size. With a single output the size
+              doesn't matter.
             </p>
             {draft.outputs.map((o) => (
               <div className="toolbar" key={o.key}>
@@ -304,7 +305,7 @@ export function Recipes() {
                   </select>
                 </label>
                 <label className="inline">
-                  Weight
+                  Size
                   <input
                     type="number"
                     min={0}
