@@ -20,15 +20,22 @@ export function ProductionHistory() {
 
   const recipes = useApi<Recipe[]>('/api/recipes') // active only, like frmProduction
   const stock = useApi<InventoryRow[]>(branch ? `/api/inventory/branch/${encodeURIComponent(branch)}` : null)
+  // Full catalog just for output display names - a finished-good SKU the branch
+  // has never produced won't be in its branch stock yet, so fall back to the SKU.
+  const catalog = useApi<InventoryRow[]>('/api/inventory')
+  const stockName = (sku: string) => {
+    const p = (catalog.data ?? []).find((r) => r.sku === sku)
+    return p ? (p.brand && p.brand !== p.basename ? `${p.brand} ${p.basename}` : p.basename) : sku
+  }
 
   const [entryOpen, setEntryOpen] = useState(false)
   const [kind, setKind] = useState<Recipe['kind']>('Baking')
   const [recipeId, setRecipeId] = useState<number | ''>('')
   const [multiplier, setMultiplier] = useState('1')
-  // '' = follow the recipe default (outputQty × multiplier); a typed number is
-  // the actual yield (a burnt tray, extra pieces). Sent as 0 when following the
-  // default, which the server reads as "use the recipe's scaled yield".
-  const [outputQty, setOutputQty] = useState('')
+  // What the baker actually made, keyed by output SKU. Every possible output
+  // starts blank (= 0); the baker types how many of each they made. The recipe
+  // no longer has a single fixed yield - a bake is whatever mix was produced.
+  const [outputQtys, setOutputQtys] = useState<Record<string, string>>({})
   const [staff, setStaff] = useState('')
 
   const [busy, setBusy] = useState(false)
@@ -49,20 +56,12 @@ export function ProductionHistory() {
   const mult = Number(multiplier)
   const multValid = mult > 0 && Number.isFinite(mult)
 
-  // Default yield, shown as the output placeholder and used when outputQty is
-  // left blank - same formula as frmProduction's numOutputQty auto-fill. C#'s
-  // Math.Round defaults to banker's rounding (half to even), JS's rounds half
-  // up, and this number must preview what the SERVER will record for a blank
-  // yield - so replicate ToEven for the exact-half case (yield 5 x 0.5 = 2.5
-  // records 2, not 3).
-  const roundHalfEven = (v: number) => {
-    const floor = Math.floor(v)
-    const diff = v - floor
-    if (diff > 0.5) return floor + 1
-    if (diff < 0.5) return floor
-    return floor % 2 === 0 ? floor : floor + 1
+  // Parse an entered per-output qty ('' / undefined = 0).
+  const enteredQty = (sku: string) => {
+    const v = outputQtys[sku]
+    return v === undefined || v === '' ? 0 : Number(v)
   }
-  const defaultYield = recipe && multValid ? roundHalfEven(recipe.outputQty * mult) : 0
+  const totalMade = (recipe?.outputs ?? []).reduce((sum, o) => sum + enteredQty(o.outputSku), 0)
 
   const preview = useMemo(() => {
     if (!recipe || !multValid) return []
@@ -86,7 +85,7 @@ export function ProductionHistory() {
   function pickKind(k: Recipe['kind']) {
     setKind(k)
     setRecipeId('')
-    setOutputQty('')
+    setOutputQtys({})
   }
 
   async function submit() {
@@ -96,31 +95,29 @@ export function ProductionHistory() {
     if (!multValid) return setError('Batch multiplier must be greater than zero.')
     if (!staff.trim()) return setError('Enter who baked or decorated this batch.')
 
-    const actual = outputQty === '' ? 0 : Number(outputQty)
-    if (outputQty !== '' && (!Number.isInteger(actual) || actual < 0))
-      return setError('Actual yield must be a whole number of zero or more.')
+    // Validate each entered output qty: non-negative whole number.
+    for (const o of recipe.outputs) {
+      const raw = outputQtys[o.outputSku]
+      if (raw === undefined || raw === '') continue
+      const n = Number(raw)
+      if (!Number.isInteger(n) || n < 0)
+        return setError('Each quantity made must be a whole number of zero or more.')
+    }
 
-    // An explicitly typed 0 cannot be honoured: the server treats OutputQty <= 0
-    // as "use the recipe's default yield", so a burnt-batch 0 would be silently
-    // recorded as a full successful batch. (WinForms has the same silent
-    // discard - logged in /bug-track.md.) Refuse with the truth rather than
-    // submit something that means the opposite of what was typed.
-    if (outputQty !== '' && actual === 0 && defaultYield > 0)
-      return setError(
-        `A zero yield can't be recorded yet: the server replaces 0 with the recipe's default ` +
-          `(${defaultYield}). Leave the field blank to use the default, or record the loss as a ` +
-          `stock adjustment instead.`,
-      )
+    // Build the outputs the baker actually made (qty > 0). Weights are looked up
+    // server-side from the recipe, so we send only {outputSku, qty} - the field
+    // name must be outputSku to bind to the server's ProductionOutputInputDto.
+    const outputs = recipe.outputs
+      .map((o) => ({ outputSku: o.outputSku, qty: enteredQty(o.outputSku) }))
+      .filter((x) => x.qty > 0)
 
-    // Same phantom-loss guard as frmProduction: a too-small multiplier can round
-    // the yield to 0 while ingredients (rounded up) are still consumed. Checked
-    // on the value actually being submitted (blank -> the recipe default).
-    const effectiveYield = outputQty === '' ? defaultYield : actual
-    if (effectiveYield === 0) {
+    // Burnt-batch guard: nothing made but ingredients are still consumed (a
+    // recorded loss). Warn-but-allow, same spirit as the old zero-yield path.
+    if (outputs.length === 0) {
       if (
         !window.confirm(
-          'This batch produces 0 output at the current multiplier but still consumes ingredients ' +
-            '(usually the multiplier is too small). Record it anyway?',
+          'This batch produces nothing but still consumes ingredients (a recorded loss). ' +
+            'Record it anyway?',
         )
       )
         return
@@ -129,27 +126,27 @@ export function ProductionHistory() {
     if (!txId.current) txId.current = newTicketId('PRD')
     setBusy(true)
     try {
-      const result = await api.post<{ outputSku: string; outputQty: number; totalInputCost: number }>(
-        '/api/production',
-        {
-          branch,
-          recipeId: recipe.recipeId,
-          staffName: staff.trim(),
-          batchMultiplier: mult,
-          outputQty: actual,
-          transactionId: txId.current,
-        },
-      )
-      setNotice(
-        `Recorded. Produced ${formatQty(result.outputQty)} of ${result.outputSku} ` +
-          `(ingredient cost ${formatMoney(result.totalInputCost)}).`,
-      )
+      const result = await api.post<{
+        outputs: { outputSku: string; qty: number; unitCost: number; cost: number }[]
+        totalInputCost: number
+      }>('/api/production', {
+        branch,
+        recipeId: recipe.recipeId,
+        staffName: staff.trim(),
+        batchMultiplier: mult,
+        outputs,
+        transactionId: txId.current,
+      })
+      const made = result.outputs.length
+        ? result.outputs.map((o) => `${formatQty(o.qty)} × ${o.outputSku}`).join(', ')
+        : 'nothing (recorded loss)'
+      setNotice(`Recorded. Produced ${made} (ingredient cost ${formatMoney(result.totalInputCost)}).`)
       txId.current = null
-      // Reset like frmProduction: staff and multiplier clear, the recipe stays
-      // picked for the common bake-again-tomorrow flow.
+      // Reset: staff, multiplier, and the entered quantities clear; the recipe
+      // stays picked for the common bake-again-tomorrow flow.
       setStaff('')
       setMultiplier('1')
-      setOutputQty('')
+      setOutputQtys({})
       stock.reload()
       setHistoryNonce((n) => n + 1)
     } catch (err) {
@@ -195,7 +192,7 @@ export function ProductionHistory() {
                 value={recipeId === '' ? '' : String(recipeId)}
                 onChange={(e) => {
                   setRecipeId(e.target.value === '' ? '' : Number(e.target.value))
-                  setOutputQty('')
+                  setOutputQtys({})
                 }}
               >
                 <option value="">— choose —</option>
@@ -217,21 +214,37 @@ export function ProductionHistory() {
               />
             </label>
             <label className="inline">
-              Actual yield
-              <input
-                type="number"
-                min={0}
-                step={1}
-                value={outputQty}
-                onChange={(e) => setOutputQty(e.target.value)}
-                placeholder={recipe ? `${defaultYield} (recipe)` : ''}
-              />
-            </label>
-            <label className="inline">
               Baked / decorated by
               <input value={staff} onChange={(e) => setStaff(e.target.value)} placeholder="Staff name" />
             </label>
           </div>
+
+          {recipe && (
+            <>
+              <h3>What did you make?</h3>
+              <p className="muted">
+                Enter how many of each type this batch produced — leave a type at 0 if you didn't
+                make it. The ingredient cost splits across whatever you made, by relative size.
+              </p>
+              <div className="toolbar" style={{ flexWrap: 'wrap' }}>
+                {recipe.outputs.map((o) => (
+                  <label className="inline" key={o.outputSku}>
+                    {stockName(o.outputSku)}
+                    <input
+                      type="number"
+                      min={0}
+                      step={1}
+                      value={outputQtys[o.outputSku] ?? ''}
+                      onChange={(e) => setOutputQtys((m) => ({ ...m, [o.outputSku]: e.target.value }))}
+                      placeholder="0"
+                      style={{ width: 90 }}
+                    />
+                  </label>
+                ))}
+              </div>
+              <p className="muted">Total made this batch: {formatQty(totalMade)}</p>
+            </>
+          )}
 
           {recipe && preview.length > 0 && (
             <>

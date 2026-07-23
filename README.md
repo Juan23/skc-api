@@ -4,9 +4,12 @@ A live inventory / delivery / production / sales system that runs a real bakery-
 business — a central office plus four branches. Designed, built, and operated end-to-end
 by a single developer: backend, web front end, desktop clients, database, and deployment.
 
-This repo is the **central API + web app**. Two sibling repos complete the system:
+This repo is the **central API + web app** — and, as of 2026-07-23, the sole focus of active
+development. Two sibling repos complete the system:
 
-- **[Juan23/SKC](https://github.com/Juan23/SKC)** — WinForms desktop clients (office, branch, and owner-admin apps)
+- **[Juan23/SKC](https://github.com/Juan23/SKC)** — WinForms desktop clients (office, branch, and
+  owner-admin apps). **Frozen 2026-07-23** — maintenance-only, no new features; all client-side
+  admin work now goes through this repo's `SKC Admin CLI` console app instead.
 - **[Juan23/skc-web](https://github.com/Juan23/skc-web)** — the public website (simplykates.com)
 
 ## What it does

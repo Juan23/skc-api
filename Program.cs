@@ -71,8 +71,12 @@ bool IsTrustedOfficeIp(HttpContext http)
 // below because it (not the phone) is the one that stands in as a branch device.
 const string OwnerLaptopIp = "100.108.218.24";
 const string OwnerPhoneIp = "100.81.94.66";
+// Owner's home server (`threelittlebears`) - the dev/ops box changes are built and
+// verified from, added 2026-07-23 so owner-gated screens (recipes, prices) can be
+// driven from it too.
+const string OwnerHomeServerIp = "100.69.186.113";
 
-var ownerIps = new HashSet<string> { OwnerLaptopIp, OwnerPhoneIp };
+var ownerIps = new HashSet<string> { OwnerLaptopIp, OwnerPhoneIp, OwnerHomeServerIp };
 
 bool IsOwnerIp(HttpContext http)
 {
@@ -261,15 +265,21 @@ app.Use(async (http, next) =>
 });
 
 // Shared validation for recipe create/update. Kind mirrors the DB's chk_recipe_kind
-// constraint and quantities must be positive, so a bad value gets a clean 400 instead of
-// either a raw Postgres constraint-violation message or a recipe that silently produces
-// nothing (see POST /api/production's OutputQty=0 case for what a zero-qty recipe does).
+// constraint; a recipe needs at least one output (its menu of possible finished goods),
+// each with a positive weight and a distinct SKU, and every input line a positive qty -
+// so a bad value gets a clean 400 instead of a raw Postgres constraint-violation message.
 string? ValidateRecipeDto(RecipeDto dto)
 {
     if (dto.Kind != "Baking" && dto.Kind != "Decorating")
         return "Kind must be Baking or Decorating.";
-    if (dto.OutputQty <= 0)
-        return "OutputQty must be greater than zero.";
+    if (dto.Outputs == null || dto.Outputs.Count == 0)
+        return "A recipe needs at least one possible output.";
+    if (dto.Outputs.Any(o => string.IsNullOrWhiteSpace(o.OutputSku)))
+        return "Every output needs a product.";
+    if (dto.Outputs.Any(o => o.Weight <= 0))
+        return "Every output's weight must be greater than zero.";
+    if (dto.Outputs.Select(o => o.OutputSku).Distinct(StringComparer.OrdinalIgnoreCase).Count() != dto.Outputs.Count)
+        return "The same output product is listed twice.";
     if (dto.Lines.Any(l => l.Qty <= 0))
         return "Each recipe line's Qty must be greater than zero.";
     return null;
@@ -1218,15 +1228,20 @@ app.MapGet("/api/recipes", async (bool? includeInactive) =>
 {
     using var db = new NpgsqlConnection(connectionString);
     var recipes = (await db.QueryAsync<RecipeRow>(@"
-        SELECT recipe_id AS RecipeId, name AS Name, kind AS Kind, output_sku AS OutputSku,
-               output_qty AS OutputQty, is_active AS IsActive
+        SELECT recipe_id AS RecipeId, name AS Name, kind AS Kind, is_active AS IsActive
         FROM recipes WHERE (@includeInactive OR is_active = true) ORDER BY name",
         new { includeInactive = includeInactive ?? false })).ToList();
     var lines = (await db.QueryAsync<RecipeLineRawRow>(
         "SELECT recipe_id AS RecipeId, input_sku AS InputSku, qty AS Qty FROM recipe_lines")).ToList();
+    var outputs = (await db.QueryAsync<RecipeOutputRawRow>(
+        "SELECT recipe_id AS RecipeId, output_sku AS OutputSku, weight AS Weight FROM recipe_outputs")).ToList();
     foreach (var r in recipes)
+    {
         r.Lines = lines.Where(l => l.RecipeId == r.RecipeId)
             .Select(l => new RecipeLineDto { InputSku = l.InputSku, Qty = l.Qty }).ToList();
+        r.Outputs = outputs.Where(o => o.RecipeId == r.RecipeId)
+            .Select(o => new RecipeOutputDto { OutputSku = o.OutputSku, Weight = o.Weight }).ToList();
+    }
     return Results.Ok(recipes);
 });
 
@@ -1234,14 +1249,16 @@ app.MapGet("/api/recipes/{id}", async (int id) =>
 {
     using var db = new NpgsqlConnection(connectionString);
     var recipe = await db.QuerySingleOrDefaultAsync<RecipeRow>(@"
-        SELECT recipe_id AS RecipeId, name AS Name, kind AS Kind, output_sku AS OutputSku,
-               output_qty AS OutputQty, is_active AS IsActive
+        SELECT recipe_id AS RecipeId, name AS Name, kind AS Kind, is_active AS IsActive
         FROM recipes WHERE recipe_id = @id", new { id });
     if (recipe == null) return Results.NotFound();
 
     var lines = await db.QueryAsync<RecipeLineRawRow>(
         "SELECT recipe_id AS RecipeId, input_sku AS InputSku, qty AS Qty FROM recipe_lines WHERE recipe_id = @id", new { id });
     recipe.Lines = lines.Select(l => new RecipeLineDto { InputSku = l.InputSku, Qty = l.Qty }).ToList();
+    var outputs = await db.QueryAsync<RecipeOutputRawRow>(
+        "SELECT recipe_id AS RecipeId, output_sku AS OutputSku, weight AS Weight FROM recipe_outputs WHERE recipe_id = @id", new { id });
+    recipe.Outputs = outputs.Select(o => new RecipeOutputDto { OutputSku = o.OutputSku, Weight = o.Weight }).ToList();
     return Results.Ok(recipe);
 });
 
@@ -1258,14 +1275,19 @@ app.MapPost("/api/recipes", async (RecipeDto dto, HttpContext http) =>
     try
     {
         int recipeId = await db.ExecuteScalarAsync<int>(@"
-            INSERT INTO recipes (name, kind, output_sku, output_qty)
-            VALUES (@Name, @Kind, @OutputSku, @OutputQty) RETURNING recipe_id",
-            new { dto.Name, dto.Kind, dto.OutputSku, dto.OutputQty }, tx);
+            INSERT INTO recipes (name, kind)
+            VALUES (@Name, @Kind) RETURNING recipe_id",
+            new { dto.Name, dto.Kind }, tx);
 
         foreach (var line in dto.Lines)
             await db.ExecuteAsync(
                 "INSERT INTO recipe_lines (recipe_id, input_sku, qty) VALUES (@recipeId, @InputSku, @Qty)",
                 new { recipeId, line.InputSku, line.Qty }, tx);
+
+        foreach (var o in dto.Outputs)
+            await db.ExecuteAsync(
+                "INSERT INTO recipe_outputs (recipe_id, output_sku, weight) VALUES (@recipeId, @OutputSku, @Weight)",
+                new { recipeId, o.OutputSku, o.Weight }, tx);
 
         await tx.CommitAsync();
         return Results.Ok(new { RecipeId = recipeId });
@@ -1286,8 +1308,8 @@ app.MapPut("/api/recipes/{id}", async (int id, RecipeDto dto, HttpContext http) 
     try
     {
         int rows = await db.ExecuteAsync(@"
-            UPDATE recipes SET name = @Name, kind = @Kind, output_sku = @OutputSku, output_qty = @OutputQty
-            WHERE recipe_id = @id", new { id, dto.Name, dto.Kind, dto.OutputSku, dto.OutputQty }, tx);
+            UPDATE recipes SET name = @Name, kind = @Kind
+            WHERE recipe_id = @id", new { id, dto.Name, dto.Kind }, tx);
         if (rows == 0) { await tx.RollbackAsync(); return Results.NotFound(); }
 
         await db.ExecuteAsync("DELETE FROM recipe_lines WHERE recipe_id = @id", new { id }, tx);
@@ -1295,6 +1317,12 @@ app.MapPut("/api/recipes/{id}", async (int id, RecipeDto dto, HttpContext http) 
             await db.ExecuteAsync(
                 "INSERT INTO recipe_lines (recipe_id, input_sku, qty) VALUES (@id, @InputSku, @Qty)",
                 new { id, line.InputSku, line.Qty }, tx);
+
+        await db.ExecuteAsync("DELETE FROM recipe_outputs WHERE recipe_id = @id", new { id }, tx);
+        foreach (var o in dto.Outputs)
+            await db.ExecuteAsync(
+                "INSERT INTO recipe_outputs (recipe_id, output_sku, weight) VALUES (@id, @OutputSku, @Weight)",
+                new { id, o.OutputSku, o.Weight }, tx);
 
         await tx.CommitAsync();
         return Results.Ok();
@@ -1341,7 +1369,16 @@ app.MapPost("/api/production", async (ProductionDto dto, HttpContext http) =>
     // error. IP gating above is now this endpoint's first line of defense for onboarded branches;
     // this validation remains the only protection for branches not yet on the allowlist.
     if (dto.BatchMultiplier <= 0) return Results.BadRequest("BatchMultiplier must be greater than zero.");
-    if (dto.OutputQty < 0) return Results.BadRequest("OutputQty cannot be negative.");
+    // Outputs is what the baker actually made (one line per finished-good type). An empty
+    // list / all-zero qtys is allowed: a burnt batch still consumes ingredients (recorded as
+    // a loss) but credits nothing - warn-but-allow, same spirit as the old zero-yield path.
+    dto.Outputs ??= new();
+    if (dto.Outputs.Any(o => string.IsNullOrWhiteSpace(o.OutputSku)))
+        return Results.BadRequest("Every output line needs a product.");
+    if (dto.Outputs.Any(o => o.Qty < 0))
+        return Results.BadRequest("Output quantities cannot be negative.");
+    if (dto.Outputs.Select(o => o.OutputSku).Distinct(StringComparer.OrdinalIgnoreCase).Count() != dto.Outputs.Count)
+        return Results.BadRequest("The same output product is listed twice.");
 
     using var db = new NpgsqlConnection(connectionString);
     await db.OpenAsync();
@@ -1354,19 +1391,22 @@ app.MapPost("/api/production", async (ProductionDto dto, HttpContext http) =>
         // Idempotency: if this transaction_id already produced a batch for this branch, a prior
         // submit committed and the client just didn't hear back. Return the existing result rather
         // than FIFO-consuming inputs and crediting output a second time.
-        var existingBatch = await db.QuerySingleOrDefaultAsync<ProductionBatchRow>(@"
-            SELECT output_sku AS OutputSku, output_qty AS OutputQty, total_input_cost AS TotalInputCost
+        var existingBatch = await db.QuerySingleOrDefaultAsync<ExistingProductionBatchRow>(@"
+            SELECT local_id AS LocalId, total_input_cost AS TotalInputCost
             FROM production_batches WHERE branch_name = @Branch AND transaction_id = @TransactionId",
             new { dto.Branch, dto.TransactionId }, tx);
         if (existingBatch != null)
         {
+            var priorOutputs = (await db.QueryAsync<ProductionOutputRow>(@"
+                SELECT output_sku AS OutputSku, qty AS Qty, unit_cost AS UnitCost, cost AS Cost
+                FROM production_outputs WHERE branch_name = @Branch AND production_local_id = @LocalId
+                ORDER BY id", new { dto.Branch, existingBatch.LocalId }, tx)).ToList();
             await tx.CommitAsync();
-            return Results.Ok(new { existingBatch.OutputSku, existingBatch.OutputQty, existingBatch.TotalInputCost });
+            return Results.Ok(new { Outputs = priorOutputs, existingBatch.TotalInputCost });
         }
 
         var recipe = await db.QuerySingleOrDefaultAsync<RecipeRow>(@"
-            SELECT recipe_id AS RecipeId, name AS Name, kind AS Kind, output_sku AS OutputSku,
-                   output_qty AS OutputQty, is_active AS IsActive
+            SELECT recipe_id AS RecipeId, name AS Name, kind AS Kind, is_active AS IsActive
             FROM recipes WHERE recipe_id = @RecipeId", new { dto.RecipeId }, tx);
         if (recipe == null) { await tx.RollbackAsync(); return Results.NotFound($"No recipe {dto.RecipeId}."); }
 
@@ -1374,6 +1414,25 @@ app.MapPost("/api/production", async (ProductionDto dto, HttpContext http) =>
             "SELECT recipe_id AS RecipeId, input_sku AS InputSku, qty AS Qty FROM recipe_lines WHERE recipe_id = @RecipeId",
             new { dto.RecipeId }, tx)).ToList();
         if (lines.Count == 0) { await tx.RollbackAsync(); return Results.BadRequest("Recipe has no input lines."); }
+
+        // The recipe's output menu + weights (server-authoritative; the client only sends
+        // {sku, qty}). Validate the requested outputs against it BEFORE consuming any stock,
+        // so an unknown SKU fails fast rather than after FIFO work.
+        var recipeOutputs = (await db.QueryAsync<RecipeOutputRawRow>(
+            "SELECT recipe_id AS RecipeId, output_sku AS OutputSku, weight AS Weight FROM recipe_outputs WHERE recipe_id = @RecipeId",
+            new { dto.RecipeId }, tx)).ToList();
+        if (recipeOutputs.Count == 0) { await tx.RollbackAsync(); return Results.BadRequest("Recipe has no possible outputs."); }
+        var weightBySku = recipeOutputs.ToDictionary(o => o.OutputSku, o => o.Weight, StringComparer.OrdinalIgnoreCase);
+        var canonicalSku = recipeOutputs.ToDictionary(o => o.OutputSku, o => o.OutputSku, StringComparer.OrdinalIgnoreCase);
+        foreach (var o in dto.Outputs)
+            if (!weightBySku.ContainsKey(o.OutputSku))
+            { await tx.RollbackAsync(); return Results.BadRequest($"'{o.OutputSku}' is not one of recipe {dto.RecipeId}'s outputs."); }
+
+        // Only outputs actually made (qty > 0) get credited, mapped to the recipe's canonical
+        // SKU casing (the inventory FK) and its weight snapshot.
+        var made = dto.Outputs.Where(o => o.Qty > 0)
+            .Select(o => new { OutputSku = canonicalSku[o.OutputSku], o.Qty, Weight = weightBySku[o.OutputSku] })
+            .ToList();
 
         decimal totalInputCost = 0;
         var consumedRows = new List<(string Sku, int Qty, decimal Cost)>();
@@ -1411,27 +1470,20 @@ app.MapPost("/api/production", async (ProductionDto dto, HttpContext http) =>
             consumedRows.Add((line.InputSku, qtyNeeded, lineCost));
         }
 
-        // OutputQty lets the baker record actual yield (a burnt tray, etc.); 0 means
-        // "use the recipe's default yield scaled by the multiplier".
-        int outputQty = dto.OutputQty > 0 ? dto.OutputQty : (int)Math.Round(recipe.OutputQty * dto.BatchMultiplier);
-        decimal outputUnitCost = outputQty > 0 ? totalInputCost / outputQty : 0;
-
-        int nextLotId = await db.ExecuteScalarAsync<int>(
-            "SELECT COALESCE(MAX(lot_id), 0) FROM inventory_lots WHERE branch_name = @Branch", new { dto.Branch }, tx) + 1;
-
-        await db.ExecuteAsync(@"
-            INSERT INTO inventory_lots (branch_name, lot_id, sku, date_received, original_qty, remaining_qty, unit_cost)
-            VALUES (@Branch, @LotId, @OutputSku, CURRENT_TIMESTAMP, @OutputQty, @OutputQty, @UnitCost)",
-            new { dto.Branch, LotId = nextLotId, recipe.OutputSku, OutputQty = outputQty, UnitCost = outputUnitCost }, tx);
+        // Split the batch's total ingredient cost across the outputs actually made,
+        // proportional to qty x weight. weightedUnits == 0 means nothing was made (burnt
+        // batch): ingredients are still consumed above (a recorded loss) but no output lots
+        // are credited.
+        decimal weightedUnits = made.Sum(m => m.Qty * m.Weight);
 
         int nextLocalId = await db.ExecuteScalarAsync<int>(
             "SELECT COALESCE(MAX(local_id), 0) FROM production_batches WHERE branch_name = @Branch", new { dto.Branch }, tx) + 1;
 
         await db.ExecuteAsync(@"
-            INSERT INTO production_batches (branch_name, local_id, transaction_id, recipe_id, staff_name, batch_multiplier, output_sku, output_qty, total_input_cost)
-            VALUES (@Branch, @LocalId, @TransactionId, @RecipeId, @StaffName, @BatchMultiplier, @OutputSku, @OutputQty, @TotalInputCost)",
+            INSERT INTO production_batches (branch_name, local_id, transaction_id, recipe_id, staff_name, batch_multiplier, total_input_cost)
+            VALUES (@Branch, @LocalId, @TransactionId, @RecipeId, @StaffName, @BatchMultiplier, @TotalInputCost)",
             new { dto.Branch, LocalId = nextLocalId, dto.TransactionId, dto.RecipeId, dto.StaffName, dto.BatchMultiplier,
-                  recipe.OutputSku, OutputQty = outputQty, TotalInputCost = totalInputCost }, tx);
+                  TotalInputCost = totalInputCost }, tx);
 
         foreach (var c in consumedRows)
             await db.ExecuteAsync(@"
@@ -1439,8 +1491,41 @@ app.MapPost("/api/production", async (ProductionDto dto, HttpContext http) =>
                 VALUES (@Branch, @LocalId, @TransactionId, @Sku, @Qty, @Cost)",
                 new { dto.Branch, LocalId = nextLocalId, dto.TransactionId, c.Sku, c.Qty, c.Cost }, tx);
 
+        var outputRows = new List<ProductionOutputRow>();
+        if (weightedUnits > 0)
+        {
+            decimal costPerWeightedUnit = totalInputCost / weightedUnits;
+            // Lot ids are per-branch; each output SKU gets its own credited lot, so take the
+            // current MAX once and increment locally under the advisory lock held above.
+            int nextLotId = await db.ExecuteScalarAsync<int>(
+                "SELECT COALESCE(MAX(lot_id), 0) FROM inventory_lots WHERE branch_name = @Branch", new { dto.Branch }, tx);
+
+            foreach (var m in made)
+            {
+                // Banker's rounding (half-to-even) at 4 dp. Summed output cost can differ from
+                // total input cost by a few centavos; that drift is accepted (raw-material
+                // losses on liquids/powders dwarf it) - see webapp-multi-output-production-plan.md.
+                decimal unitCost = Math.Round(m.Weight * costPerWeightedUnit, 4, MidpointRounding.ToEven);
+                decimal cost = Math.Round(unitCost * m.Qty, 4, MidpointRounding.ToEven);
+                nextLotId += 1;
+
+                await db.ExecuteAsync(@"
+                    INSERT INTO inventory_lots (branch_name, lot_id, sku, date_received, original_qty, remaining_qty, unit_cost)
+                    VALUES (@Branch, @LotId, @Sku, CURRENT_TIMESTAMP, @Qty, @Qty, @UnitCost)",
+                    new { dto.Branch, LotId = nextLotId, Sku = m.OutputSku, m.Qty, UnitCost = unitCost }, tx);
+
+                await db.ExecuteAsync(@"
+                    INSERT INTO production_outputs (branch_name, production_local_id, transaction_id, output_sku, qty, weight, unit_cost, lot_id, cost)
+                    VALUES (@Branch, @LocalId, @TransactionId, @Sku, @Qty, @Weight, @UnitCost, @LotId, @Cost)",
+                    new { dto.Branch, LocalId = nextLocalId, dto.TransactionId, Sku = m.OutputSku, m.Qty, m.Weight,
+                          UnitCost = unitCost, LotId = nextLotId, Cost = cost }, tx);
+
+                outputRows.Add(new ProductionOutputRow { OutputSku = m.OutputSku, Qty = m.Qty, UnitCost = unitCost, Cost = cost });
+            }
+        }
+
         await tx.CommitAsync();
-        return Results.Ok(new { OutputSku = recipe.OutputSku, OutputQty = outputQty, TotalInputCost = totalInputCost });
+        return Results.Ok(new { Outputs = outputRows, TotalInputCost = totalInputCost });
     }
     catch (InsufficientStockException ex) { await tx.RollbackAsync(); return Results.Conflict(ex.Message); }
     catch (Exception ex) { await tx.RollbackAsync(); return Results.Problem(ex.Message); }
@@ -1451,15 +1536,30 @@ app.MapGet("/api/production", async (string branch, DateTime? start, DateTime? e
     if (!CanReadBranchScoped(branch, http)) return Results.Problem("Production history is restricted to the office, the owner, or the branch's own devices.", statusCode: 403);
     using var db = new NpgsqlConnection(connectionString);
     var sql = @"
-        SELECT p.transaction_id AS TransactionId, p.date AS Date, p.recipe_id AS RecipeId, r.name AS RecipeName,
-               p.staff_name AS StaffName, p.batch_multiplier AS BatchMultiplier, p.output_sku AS OutputSku,
-               p.output_qty AS OutputQty, p.total_input_cost AS TotalInputCost
+        SELECT p.local_id AS LocalId, p.transaction_id AS TransactionId, p.date AS Date, p.recipe_id AS RecipeId, r.name AS RecipeName,
+               p.staff_name AS StaffName, p.batch_multiplier AS BatchMultiplier, p.total_input_cost AS TotalInputCost
         FROM production_batches p LEFT JOIN recipes r ON p.recipe_id = r.recipe_id
         WHERE p.branch_name = @branch
           AND (@start::timestamp IS NULL OR p.date >= @start::timestamp)
           AND (@end::timestamp IS NULL OR p.date <= @end::timestamp)
         ORDER BY p.date DESC";
-    return Results.Ok(await db.QueryAsync<ProductionBatchRow>(sql, new { branch, start, end }));
+    var batches = (await db.QueryAsync<ProductionBatchRow>(sql, new { branch, start, end })).ToList();
+    if (batches.Count == 0) return Results.Ok(batches);
+
+    // Attach each batch's output ledger. Matched on (branch, local_id) - the same key
+    // production_outputs is written under. Historical batches (pre-migration-010) were
+    // backfilled into production_outputs, so they carry their single output here too.
+    var localIds = batches.Select(b => b.LocalId).ToArray();
+    var outputs = (await db.QueryAsync<ProductionOutputJoinRow>(@"
+        SELECT production_local_id AS LocalId, output_sku AS OutputSku, qty AS Qty, unit_cost AS UnitCost, cost AS Cost
+        FROM production_outputs
+        WHERE branch_name = @branch AND production_local_id = ANY(@localIds)
+        ORDER BY id", new { branch, localIds })).ToList();
+    foreach (var b in batches)
+        b.Outputs = outputs.Where(o => o.LocalId == b.LocalId)
+            .Select(o => new ProductionOutputRow { OutputSku = o.OutputSku, Qty = o.Qty, UnitCost = o.UnitCost, Cost = o.Cost })
+            .ToList();
+    return Results.Ok(batches);
 });
 
 // POS sale sync: the branch app queues sales in a local SQLite db while offline and pushes
@@ -1863,12 +1963,28 @@ public class RecipeLineRawRow
     public int Qty { get; set; }
 }
 
+// A recipe's possible outputs. Weight is a relative size factor (e.g. 8-inch=40,
+// cupcake=2) used to split a batch's ingredient cost across the outputs actually
+// made: each output's cost share is proportional to qty x weight. With a single
+// output the weight is irrelevant (that output gets the whole cost).
+public class RecipeOutputDto
+{
+    public string OutputSku { get; set; } = string.Empty;
+    public decimal Weight { get; set; } = 1;
+}
+
+public class RecipeOutputRawRow
+{
+    public int RecipeId { get; set; }
+    public string OutputSku { get; set; } = string.Empty;
+    public decimal Weight { get; set; }
+}
+
 public class RecipeDto
 {
     public string Name { get; set; } = string.Empty;
     public string Kind { get; set; } = string.Empty; // "Baking" or "Decorating"
-    public string OutputSku { get; set; } = string.Empty;
-    public int OutputQty { get; set; }
+    public List<RecipeOutputDto> Outputs { get; set; } = new();
     public List<RecipeLineDto> Lines { get; set; } = new();
 }
 
@@ -1877,9 +1993,8 @@ public class RecipeRow
     public int RecipeId { get; set; }
     public string Name { get; set; } = string.Empty;
     public string Kind { get; set; } = string.Empty;
-    public string OutputSku { get; set; } = string.Empty;
-    public int OutputQty { get; set; }
     public bool IsActive { get; set; }
+    public List<RecipeOutputDto> Outputs { get; set; } = new();
     public List<RecipeLineDto> Lines { get; set; } = new();
 }
 
@@ -1890,27 +2005,63 @@ public class InsufficientStockException : Exception
     public InsufficientStockException(string message) : base(message) { }
 }
 
+// One line of "what the baker actually made" for a batch. Qty is per finished-good
+// type; the server looks up the weight from the recipe (weights are never client-
+// supplied). Qty 0 outputs can be sent and are ignored.
+public class ProductionOutputInputDto
+{
+    public string OutputSku { get; set; } = string.Empty;
+    public int Qty { get; set; }
+}
+
 public class ProductionDto
 {
     public string Branch { get; set; } = string.Empty;
     public int RecipeId { get; set; }
     public string StaffName { get; set; } = string.Empty;
     public decimal BatchMultiplier { get; set; } = 1;
-    public int OutputQty { get; set; } // 0 = use the recipe's default yield * BatchMultiplier
+    public List<ProductionOutputInputDto> Outputs { get; set; } = new();
     public string TransactionId { get; set; } = string.Empty;
+}
+
+// Minimal row for the idempotency early-return: enough to look the batch's
+// already-recorded outputs back up by (branch, local_id).
+public class ExistingProductionBatchRow
+{
+    public int LocalId { get; set; }
+    public decimal TotalInputCost { get; set; }
+}
+
+public class ProductionOutputRow
+{
+    public string OutputSku { get; set; } = string.Empty;
+    public int Qty { get; set; }
+    public decimal UnitCost { get; set; }
+    public decimal Cost { get; set; }
+}
+
+// Raw row for the GET /api/production output fan-out: carries the batch's local_id
+// so outputs can be matched back to their parent batch in code.
+public class ProductionOutputJoinRow
+{
+    public int LocalId { get; set; }
+    public string OutputSku { get; set; } = string.Empty;
+    public int Qty { get; set; }
+    public decimal UnitCost { get; set; }
+    public decimal Cost { get; set; }
 }
 
 public class ProductionBatchRow
 {
+    public int LocalId { get; set; }
     public string TransactionId { get; set; } = string.Empty;
     public DateTime Date { get; set; }
     public int RecipeId { get; set; }
     public string RecipeName { get; set; } = string.Empty;
     public string StaffName { get; set; } = string.Empty;
     public decimal BatchMultiplier { get; set; }
-    public string OutputSku { get; set; } = string.Empty;
-    public int OutputQty { get; set; }
     public decimal TotalInputCost { get; set; }
+    public List<ProductionOutputRow> Outputs { get; set; } = new();
 }
 
 public class InventoryItemDto

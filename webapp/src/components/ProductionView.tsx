@@ -44,9 +44,24 @@ export function ProductionView({ branch }: { branch: string }) {
     { header: 'Recipe', cell: (b) => b.recipeName || `#${b.recipeId}` },
     { header: 'Staff', cell: (b) => b.staffName || '' },
     { header: '×', align: 'right', cell: (b) => formatQty(b.batchMultiplier) },
-    { header: 'Output SKU', cell: (b) => b.outputSku },
-    { header: 'Output item', cell: (b) => nameBySku.get(b.outputSku) ?? b.outputSku },
-    { header: 'Made', align: 'right', cell: (b) => formatQty(b.outputQty) },
+    // A batch can make several finished-good types - stack them. An empty list is
+    // a burnt batch (ingredients consumed, nothing produced).
+    {
+      header: 'Made',
+      cell: (b) =>
+        b.outputs.length === 0 ? (
+          <span className="muted">nothing (loss)</span>
+        ) : (
+          <span style={{ display: 'inline-flex', flexDirection: 'column', gap: 2 }}>
+            {b.outputs.map((o) => (
+              <span key={o.outputSku}>
+                {formatQty(o.qty)} × {nameBySku.get(o.outputSku) ?? o.outputSku}{' '}
+                <span className="muted">@ {formatMoney(o.unitCost)}</span>
+              </span>
+            ))}
+          </span>
+        ),
+    },
     { header: 'Input cost', align: 'right', cell: (b) => formatMoney(b.totalInputCost) },
   ]
 

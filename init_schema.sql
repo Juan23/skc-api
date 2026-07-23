@@ -104,12 +104,18 @@ CREATE TABLE IF NOT EXISTS inventory_adjustments (
 CREATE INDEX IF NOT EXISTS idx_adjustments_sku_date ON inventory_adjustments(sku, date);
 
 -- 6. Baking/decorating production module (recipes are global, not per-branch)
+-- A recipe has FIXED inputs (recipe_lines) but a MENU of possible outputs
+-- (recipe_outputs) - one bake can yield several finished-good types at once
+-- (see migration 010 + webapp-multi-output-production-plan.md).
 CREATE TABLE IF NOT EXISTS recipes (
     recipe_id SERIAL PRIMARY KEY,
     name VARCHAR(255) NOT NULL,
     kind VARCHAR(20) NOT NULL,
+    -- DEPRECATED single-output columns (superseded by recipe_outputs). Kept
+    -- nullable for old rows / the CLI's pending migration; a future cleanup
+    -- migration drops them. New code never writes them.
     output_sku VARCHAR(100) REFERENCES inventory(sku) ON UPDATE CASCADE,
-    output_qty INTEGER NOT NULL,
+    output_qty INTEGER,
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
     created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
 
@@ -125,6 +131,20 @@ CREATE TABLE IF NOT EXISTS recipe_lines (
 
 CREATE INDEX IF NOT EXISTS idx_recipe_lines_recipe ON recipe_lines(recipe_id);
 
+-- Recipe output menu: which finished goods a recipe can produce, each with a
+-- relative size weight used to split a batch's ingredient cost across the
+-- outputs actually made (cost share proportional to qty x weight).
+CREATE TABLE IF NOT EXISTS recipe_outputs (
+    id         SERIAL PRIMARY KEY,
+    recipe_id  INTEGER NOT NULL REFERENCES recipes(recipe_id) ON DELETE CASCADE,
+    output_sku VARCHAR(100) REFERENCES inventory(sku) ON UPDATE CASCADE,
+    weight     NUMERIC(18,4) NOT NULL DEFAULT 1,
+    CONSTRAINT uq_recipe_output UNIQUE (recipe_id, output_sku),
+    CONSTRAINT chk_recipe_output_weight CHECK (weight > 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_recipe_outputs_recipe ON recipe_outputs(recipe_id);
+
 -- Production batch header: branch-scoped and staff-attributed, same
 -- uq_branch_* idempotency pattern as purchase_logs/delivery_logs.
 CREATE TABLE IF NOT EXISTS production_batches (
@@ -136,8 +156,10 @@ CREATE TABLE IF NOT EXISTS production_batches (
     staff_name VARCHAR(100) NOT NULL,
     date TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     batch_multiplier NUMERIC(18, 4) NOT NULL DEFAULT 1,
+    -- DEPRECATED single-output columns (superseded by production_outputs). Kept
+    -- nullable for old rows; new code leaves them NULL. Future migration drops.
     output_sku VARCHAR(100) REFERENCES inventory(sku) ON UPDATE CASCADE,
-    output_qty INTEGER NOT NULL,
+    output_qty INTEGER,
     total_input_cost NUMERIC(18, 4) NOT NULL,
     created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
 
@@ -159,6 +181,27 @@ CREATE TABLE IF NOT EXISTS production_consumed (
 );
 
 CREATE INDEX IF NOT EXISTS idx_production_consumed_batch ON production_consumed(branch_name, production_local_id);
+
+-- Per-batch output ledger: what a batch actually made, one row per finished-good
+-- type, with the recipe weight and per-unit cost snapshotted at bake time (so a
+-- later recipe-weight edit never rewrites history). unit_cost = weight x
+-- (total_input_cost / weightedUnits); cost = unit_cost x qty; lot_id is the
+-- inventory_lots row credited for this output.
+CREATE TABLE IF NOT EXISTS production_outputs (
+    id                  SERIAL PRIMARY KEY,
+    branch_name         VARCHAR(100) NOT NULL,
+    production_local_id INTEGER NOT NULL,
+    transaction_id      VARCHAR(100),
+    output_sku          VARCHAR(100) REFERENCES inventory(sku) ON UPDATE CASCADE,
+    qty                 INTEGER NOT NULL,
+    weight              NUMERIC(18, 4) NOT NULL,
+    unit_cost           NUMERIC(18, 4) NOT NULL,
+    lot_id              INTEGER,
+    cost                NUMERIC(18, 4) NOT NULL,
+    CONSTRAINT chk_production_output_qty CHECK (qty >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_production_outputs_batch ON production_outputs(branch_name, production_local_id);
 
 -- 7. POS sales (offline-first branch point-of-sale)
 -- Idempotency key is (branch_name, client_sale_id): the POS mints a GUID

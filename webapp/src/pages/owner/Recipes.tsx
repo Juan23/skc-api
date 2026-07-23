@@ -1,21 +1,25 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { DataTable } from '../../components/DataTable'
 import type { Column } from '../../components/DataTable'
 import { useApi } from '../../lib/useApi'
 import { api } from '../../api/client'
-import { formatQty } from '../../lib/format'
-import type { InventoryRow, Recipe, RecipeInput, RecipeLine } from '../../api/types'
+import type { InventoryRow, Recipe, RecipeInput, RecipeLine, RecipeOutput } from '../../api/types'
 
-// Ingredient rows carry a client-only key so React keeps each row's identity
-// when one is removed from the middle. Index keys would shift every row below
-// the deletion onto a different DOM node, which moves focus to the wrong input.
+// Ingredient and output rows carry a client-only key so React keeps each row's
+// identity when one is removed from the middle. Index keys would shift every row
+// below the deletion onto a different DOM node, moving focus to the wrong input.
 // `key` is stripped before the draft is sent - it isn't part of the wire shape.
 interface DraftLine extends RecipeLine {
   key: number
 }
 
-interface Draft extends Omit<RecipeInput, 'lines'> {
+interface DraftOutput extends RecipeOutput {
+  key: number
+}
+
+interface Draft extends Omit<RecipeInput, 'lines' | 'outputs'> {
   lines: DraftLine[]
+  outputs: DraftOutput[]
 }
 
 let nextLineKey = 1
@@ -24,11 +28,16 @@ const newLine = (line: RecipeLine = { inputSku: '', qty: 1 }): DraftLine => ({
   key: nextLineKey++,
 })
 
+let nextOutputKey = 1
+const newOutput = (o: RecipeOutput = { outputSku: '', weight: 1 }): DraftOutput => ({
+  ...o,
+  key: nextOutputKey++,
+})
+
 const emptyDraft = (): Draft => ({
   name: '',
   kind: 'Baking',
-  outputSku: '',
-  outputQty: 1,
+  outputs: [newOutput()],
   lines: [newLine()],
 })
 
@@ -36,13 +45,25 @@ const emptyDraft = (): Draft => ({
 // decorating recipe is just one whose inputs happen to include a BakedGood - so
 // there are no separate forms, only the Kind field.
 //
-// The SKC Admin CLI's Excel round-trip (`skcadmin recipes template/import`)
-// stays the owner's bulk path; this screen is for single edits. They write
-// through the same endpoints, so the two can't diverge.
+// A recipe declares a MENU of possible outputs (each with a relative size
+// weight); the baker picks which ones and how many at production time. The
+// weight splits a batch's ingredient cost across the outputs actually made.
+//
+// NOTE: the SKC Admin CLI's Excel recipe round-trip still assumes single-output
+// recipes and is OUT OF SERVICE until updated (see webapp-multi-output-
+// production-plan.md sec 6 + bug-track.md); this screen is the recipe path now.
 export function Recipes() {
   const [includeInactive, setIncludeInactive] = useState(true)
   const recipes = useApi<Recipe[]>(`/api/recipes?includeInactive=${includeInactive}`)
   const catalog = useApi<InventoryRow[]>('/api/inventory')
+
+  // SKU → display name, for the read-only "Can make" column.
+  const nameBySku = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const p of catalog.data ?? [])
+      m.set(p.sku, p.brand && p.brand !== p.basename ? `${p.brand} ${p.basename}` : p.basename)
+    return m
+  }, [catalog.data])
 
   const [editing, setEditing] = useState<number | 'new' | null>(null)
   const [draft, setDraft] = useState<Draft>(emptyDraft())
@@ -63,8 +84,7 @@ export function Recipes() {
     setDraft({
       name: r.name,
       kind: r.kind,
-      outputSku: r.outputSku,
-      outputQty: r.outputQty,
+      outputs: r.outputs.map((o) => newOutput(o)),
       lines: r.lines.map((l) => newLine(l)),
     })
     setError('')
@@ -75,6 +95,13 @@ export function Recipes() {
     setDraft((d) => ({
       ...d,
       lines: d.lines.map((l) => (l.key === key ? { ...l, ...patch } : l)),
+    }))
+  }
+
+  function setOutput(key: number, patch: Partial<RecipeOutput>) {
+    setDraft((d) => ({
+      ...d,
+      outputs: d.outputs.map((o) => (o.key === key ? { ...o, ...patch } : o)),
     }))
   }
 
@@ -98,15 +125,18 @@ export function Recipes() {
   // here instead of a round-trip; the server stays the authority either way.
   function localProblem(): string | null {
     if (!draft.name.trim()) return 'A recipe needs a name.'
-    if (!draft.outputSku) return 'Choose what this recipe produces.'
-    if (draft.outputQty <= 0) return 'Output quantity must be greater than zero.'
+    if (draft.outputs.length === 0) return 'A recipe needs at least one possible output.'
+    if (draft.outputs.some((o) => !o.outputSku)) return 'Every output needs a product.'
+    if (draft.outputs.some((o) => o.weight <= 0)) return "Every output's weight must be greater than zero."
+    const outSkus = draft.outputs.map((o) => o.outputSku)
+    if (new Set(outSkus).size !== outSkus.length) return 'The same output product is listed twice.'
     if (draft.lines.length === 0) return 'A recipe needs at least one input line.'
     if (draft.lines.some((l) => !l.inputSku)) return 'Every input line needs an ingredient.'
     if (draft.lines.some((l) => l.qty <= 0)) return "Every input line's quantity must be greater than zero."
-    // Both quantities are `int` server-side, so a typed decimal fails model
+    // Input quantities are `int` server-side, so a typed decimal fails model
     // binding before the handler runs and comes back as an opaque 400. Catch it
-    // here where the message can name the actual problem.
-    if (!Number.isInteger(draft.outputQty)) return 'Quantity made must be a whole number.'
+    // here where the message can name the actual problem. (Weights are decimal,
+    // so no whole-number check there.)
     if (draft.lines.some((l) => !Number.isInteger(l.qty)))
       return 'Ingredient quantities must be whole numbers.'
     const skus = draft.lines.map((l) => l.inputSku)
@@ -117,10 +147,12 @@ export function Recipes() {
   function save() {
     const problem = localProblem()
     if (problem) return setError(problem)
-    // Strip the client-only line keys: the API body is {inputSku, qty} only.
+    // Strip the client-only row keys: the API body is {inputSku, qty} /
+    // {outputSku, weight} only.
     const body: RecipeInput = {
-      ...draft,
       name: draft.name.trim(),
+      kind: draft.kind,
+      outputs: draft.outputs.map(({ outputSku, weight }) => ({ outputSku, weight })),
       lines: draft.lines.map(({ inputSku, qty }) => ({ inputSku, qty })),
     }
     void run(
@@ -133,7 +165,9 @@ export function Recipes() {
   const columns: Column<Recipe>[] = [
     { header: 'Recipe', cell: (r) => r.name },
     { header: 'Kind', cell: (r) => r.kind },
-    { header: 'Makes', cell: (r) => `${formatQty(r.outputQty)} × ${r.outputSku}` },
+    // A recipe can make several finished-good types now - list them (the baker
+    // chooses which and how many at production time).
+    { header: 'Can make', cell: (r) => r.outputs.map((o) => nameBySku.get(o.outputSku) ?? o.outputSku).join(', ') },
     { header: 'Inputs', align: 'right', cell: (r) => r.lines.length },
     {
       header: 'Status',
@@ -247,29 +281,54 @@ export function Recipes() {
                   <option value="Decorating">Decorating</option>
                 </select>
               </label>
-              <label className="inline">
-                Produces
-                <select
-                  value={draft.outputSku}
-                  onChange={(e) => setDraft({ ...draft, outputSku: e.target.value })}
+            </div>
+
+            <h3>Can make</h3>
+            <p className="muted">
+              The finished-good types this one recipe can produce. The baker picks which ones and
+              how many at production time. <strong>Weight</strong> is relative size (e.g. 8-inch=40,
+              cupcake=2, mini=1) — it splits a batch's ingredient cost across whatever was made,
+              proportional to qty × weight. With a single output the weight doesn't matter.
+            </p>
+            {draft.outputs.map((o) => (
+              <div className="toolbar" key={o.key}>
+                <label className="inline">
+                  Product
+                  <select value={o.outputSku} onChange={(e) => setOutput(o.key, { outputSku: e.target.value })}>
+                    <option value="">— choose —</option>
+                    {outputOptions.map((p) => (
+                      <option key={p.sku} value={p.sku}>
+                        {label(p)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="inline">
+                  Weight
+                  <input
+                    type="number"
+                    min={0}
+                    step="any"
+                    value={o.weight}
+                    onChange={(e) => setOutput(o.key, { weight: Number(e.target.value) })}
+                  />
+                </label>
+                <button
+                  className="btn destructive"
+                  disabled={draft.outputs.length === 1}
+                  onClick={() => setDraft({ ...draft, outputs: draft.outputs.filter((x) => x.key !== o.key) })}
                 >
-                  <option value="">— choose —</option>
-                  {outputOptions.map((p) => (
-                    <option key={p.sku} value={p.sku}>
-                      {label(p)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="inline">
-                Qty made
-                <input
-                  type="number"
-                  min={1}
-                  value={draft.outputQty}
-                  onChange={(e) => setDraft({ ...draft, outputQty: Number(e.target.value) })}
-                />
-              </label>
+                  Remove
+                </button>
+              </div>
+            ))}
+            <div className="toolbar">
+              <button
+                className="btn neutral"
+                onClick={() => setDraft({ ...draft, outputs: [...draft.outputs, newOutput()] })}
+              >
+                Add output
+              </button>
             </div>
 
             <h3>Ingredients</h3>

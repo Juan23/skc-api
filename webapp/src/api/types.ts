@@ -111,16 +111,25 @@ export interface AdjustmentRow {
 
 // --- production ---
 
+// One finished-good type produced by a batch. A batch can have several (or none,
+// for a burnt batch). unitCost = weight × (totalInputCost / weightedUnits).
+export interface ProductionOutput {
+  outputSku: string
+  qty: number
+  unitCost: number
+  cost: number
+}
+
 export interface ProductionBatch {
+  localId: number
   transactionId: string
   date: string
   recipeId: number
   recipeName: string | null
   staffName: string | null
   batchMultiplier: number
-  outputSku: string
-  outputQty: number
   totalInputCost: number
+  outputs: ProductionOutput[]
 }
 
 // --- POS sales ---
@@ -209,13 +218,20 @@ export interface RecipeLine {
   qty: number
 }
 
+// A recipe's possible outputs (its "menu"). weight is a relative size factor
+// (e.g. 8-inch=40, cupcake=2) used to split a batch's ingredient cost across the
+// outputs actually made, proportional to qty × weight.
+export interface RecipeOutput {
+  outputSku: string
+  weight: number
+}
+
 export interface Recipe {
   recipeId: number
   name: string
   kind: 'Baking' | 'Decorating'
-  outputSku: string
-  outputQty: number
   isActive: boolean
+  outputs: RecipeOutput[]
   lines: RecipeLine[]
 }
 
@@ -224,8 +240,7 @@ export interface Recipe {
 export interface RecipeInput {
   name: string
   kind: 'Baking' | 'Decorating'
-  outputSku: string
-  outputQty: number
+  outputs: RecipeOutput[]
   lines: RecipeLine[]
 }
 
