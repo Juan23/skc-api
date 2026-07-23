@@ -118,6 +118,16 @@ export function DayReport({ branch }: { branch: string }) {
           : `SKC-Sales-${branch}-${loadedStart}_to_${loadedEnd}.csv`
       a.click()
       URL.revokeObjectURL(url)
+      // The on-screen/printed report can include today's not-yet-synced sales
+      // (loadReport merges them), but the CSV is built from server line detail
+      // only - so a still-syncing sale is in the printed gross yet absent here.
+      // Say so, rather than let the CSV total silently under-run the printout.
+      if (summary && summary.unsyncedCount > 0) {
+        setCsvMsg(
+          `Exported. Note: ${summary.unsyncedCount} not-yet-synced sale${summary.unsyncedCount === 1 ? '' : 's'} ` +
+            'in this range are excluded from the CSV (their item detail is only on the server) - re-export once synced.',
+        )
+      }
     } catch {
       setCsvMsg('Could not export - are you online?')
     } finally {

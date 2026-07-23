@@ -14,6 +14,7 @@ import { api } from '../api/client'
 import type { SaleSummary, SaleLineExport } from '../api/types'
 import { endOfDay, localDate } from '../lib/format'
 import { loadTodayLocal } from './dayLogStore'
+import type { DayLogEntry } from './dayLogStore'
 
 export type ReportFlag = '' | 'VOIDED' | 'SHORTFALL' | 'REJECTED' | 'UNSYNCED'
 
@@ -115,12 +116,49 @@ function sortBySoldAt(rows: ReportRow[]): ReportRow[] {
 // list. On a network failure for a TODAY-ONLY range: the local stores, flagged
 // offline. Any other range rethrows so the caller can tell the user past days
 // need a connection.
+// One local day-log entry -> a report row. Shared by the offline fallback and
+// the online path's not-yet-synced merge so both flag/count local sales the
+// same way (and summarize() then rolls them up identically).
+function localEntryToRow(e: DayLogEntry): ReportRow {
+  return {
+    no: '', // the server assigns the sale no.; unsynced sales have none yet
+    soldAt: e.soldAt,
+    cashier: e.staffName || '',
+    totalCentavos: e.totalCentavos,
+    flag:
+      e.status === 'voided'
+        ? 'VOIDED'
+        : e.status === 'error'
+          ? 'REJECTED'
+          : e.status === 'pending'
+            ? 'UNSYNCED'
+            : e.status === 'shortfall'
+              ? 'SHORTFALL'
+              : '',
+    // Rejected sales never counted server-side; voided ones were reversed.
+    counted: e.status !== 'voided' && e.status !== 'error',
+  }
+}
+
+// tallyLines inputs from local entries' own line detail, over counted
+// (non-voided, non-rejected) sales only - a voided/rejected sale sold nothing.
+function localLineInputs(entries: DayLogEntry[]) {
+  return entries
+    .filter((e) => e.status !== 'voided' && e.status !== 'error')
+    .flatMap((e) => e.lines ?? [])
+    .map((l) => ({ sku: l.sku, description: l.description, qty: l.qty, lineTotalCentavos: l.lineTotalCentavos }))
+}
+
 export async function loadReport(branch: string, startDate: string, endDate: string): Promise<ReportLoad> {
   // Capture "today" up front, not inside the catch: if the clock crosses
   // midnight while the request is in flight, a catch-time re-read would no
   // longer match the (still legitimately "today") requested range and would
   // wrongly deny the offline fallback right at the boundary.
   const today = localDate()
+  // The local POS stores are today-only, so a not-yet-synced local sale is only
+  // relevant to a report whose range actually covers today (string compare is a
+  // correct date order for YYYY-MM-DD).
+  const rangeIncludesToday = startDate <= today && today <= endDate
   try {
     // Both come from the same server; fetch in parallel. /api/sales gives the
     // per-sale rows + summary counts; /api/sales/lines gives the item detail the
@@ -138,44 +176,39 @@ export async function loadReport(branch: string, startDate: string, endDate: str
       flag: s.voided ? 'VOIDED' : s.hasShortfall ? 'SHORTFALL' : '',
       counted: !s.voided,
     }))
-    const tally = tallyLines(
-      lines
-        .filter((l) => !l.voided) // a voided sale sold nothing
-        .map((l) => ({ sku: l.sku, description: l.description, qty: l.qty, lineTotalCentavos: toCentavos(l.lineTotal) })),
-    )
-    return { rows: sortBySoldAt(rows), tally, offline: false }
+    const lineInputs = lines
+      .filter((l) => !l.voided) // a voided sale sold nothing
+      .map((l) => ({ sku: l.sku, description: l.description, qty: l.qty, lineTotalCentavos: toCentavos(l.lineTotal) }))
+
+    // Merge today's local sales the server doesn't have yet, so an ONLINE report's
+    // gross matches the day log's takings instead of silently dropping a sale
+    // still inside the 60s sync window (or a terminally-rejected one) - the exact
+    // report-vs-day-log discrepancy the offline path already avoids by unioning
+    // the local stores. Deduped by clientSaleId: a synced/voided local row is
+    // already in `sales`, so only genuinely-not-yet-server-side rows (UNSYNCED,
+    // REJECTED) survive the filter, and summarize() surfaces them via its existing
+    // unsyncedCount/rejectedCount lines exactly as offline does. Best-effort - a
+    // broken local store degrades to the server-only report rather than failing
+    // the whole load (the online path otherwise never touches IndexedDB).
+    if (rangeIncludesToday) {
+      try {
+        const serverIds = new Set(sales.map((s) => s.clientSaleId))
+        const local = await loadTodayLocal(branch)
+        const missing = local.filter((e) => !serverIds.has(e.clientSaleId))
+        for (const e of missing) rows.push(localEntryToRow(e))
+        lineInputs.push(...localLineInputs(missing))
+      } catch {
+        /* local store unreadable - the server-only report still stands */
+      }
+    }
+
+    return { rows: sortBySoldAt(rows), tally: tallyLines(lineInputs), offline: false }
   } catch (err) {
     if (startDate !== today || endDate !== today) throw err
     // Reuse the day log's local UNION (pendingSales + syncedLog, branch-scoped,
     // today-only) so the offline report matches the day log exactly.
     const local = await loadTodayLocal(branch)
-    // Tally from the local line detail (present for every locally-rung sale),
-    // over counted (non-voided, non-rejected) sales only.
-    const tally = tallyLines(
-      local
-        .filter((e) => e.status !== 'voided' && e.status !== 'error')
-        .flatMap((e) => e.lines ?? [])
-        .map((l) => ({ sku: l.sku, description: l.description, qty: l.qty, lineTotalCentavos: l.lineTotalCentavos })),
-    )
-    const rows: ReportRow[] = local.map((e) => ({
-      no: '', // the server assigns the sale no.; unsynced sales have none yet
-      soldAt: e.soldAt,
-      cashier: e.staffName || '',
-      totalCentavos: e.totalCentavos,
-      flag:
-        e.status === 'voided'
-          ? 'VOIDED'
-          : e.status === 'error'
-            ? 'REJECTED'
-            : e.status === 'pending'
-              ? 'UNSYNCED'
-              : e.status === 'shortfall'
-                ? 'SHORTFALL'
-                : '',
-      // Rejected sales never counted server-side; voided ones were reversed.
-      counted: e.status !== 'voided' && e.status !== 'error',
-    }))
-    return { rows: sortBySoldAt(rows), tally, offline: true }
+    return { rows: sortBySoldAt(local.map(localEntryToRow)), tally: tallyLines(localLineInputs(local)), offline: true }
   }
 }
 
