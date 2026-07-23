@@ -67,7 +67,11 @@ test('create a multi-output recipe through the owner UI', async ({ page }) => {
 
   await expect(page.locator('.notice')).toContainText(name)
   // The list's "Can make" column shows all three output names for the new recipe.
-  const row = page.locator('table.data tr', { hasText: name })
+  // Recipes allow duplicate names (no unique constraint - see bug-track.md), and
+  // this test leaves its row behind, so a re-run finds MORE than one row with
+  // this name. They're identical (same outputs), so assert against the first
+  // match rather than tripping strict mode on the multi-element locator.
+  const row = page.locator('table.data tr', { hasText: name }).first()
   await expect(row).toContainText('Choc 8in')
   await expect(row).toContainText('Choc 10in')
   await expect(row).toContainText('Cupcake')
