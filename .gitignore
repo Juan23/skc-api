@@ -12,3 +12,9 @@ __MACOSX/
 # Vite build output - built locally and scp'd to the droplet, never committed.
 wwwroot/
 webapp/node_modules/
+
+# Playwright: real test-till credentials + run artifacts (screenshots can
+# capture staff/branch data). See skc-api/CLAUDE.md "Browser-based testing".
+webapp/.env.playwright
+webapp/test-results/
+webapp/playwright-report/
