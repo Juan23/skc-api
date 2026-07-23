@@ -2,8 +2,9 @@ import { useMemo, useState } from 'react'
 import { DataTable } from '../../components/DataTable'
 import type { Column } from '../../components/DataTable'
 import { useApi } from '../../lib/useApi'
-import { api } from '../../api/client'
+import { api, ApiError } from '../../api/client'
 import { formatMoney, formatQty } from '../../lib/format'
+import { generateSku, toProperCase } from '../../lib/sku'
 import type { InventoryRow } from '../../api/types'
 
 const CATEGORIES: InventoryRow['category'][] = [
@@ -13,6 +14,26 @@ const CATEGORIES: InventoryRow['category'][] = [
   'Miscellaneous',
 ]
 
+interface AddDraft {
+  sku: string
+  brand: string
+  baseName: string
+  category: InventoryRow['category']
+  uom: string
+  packMultiplier: string
+  price: string
+}
+
+const emptyAddDraft = (): AddDraft => ({
+  sku: '',
+  brand: '',
+  baseName: '',
+  category: 'RawMaterial',
+  uom: '',
+  packMultiplier: '1',
+  price: '0',
+})
+
 // Product classification and pricing. This single screen spans BOTH server
 // gates, deliberately:
 //   - category / UoM / pack multiplier -> PUT .../classification, office-gated
@@ -20,11 +41,27 @@ const CATEGORIES: InventoryRow['category'][] = [
 // Owner accounts pass both, but only from an owner device, so the whole screen
 // 403s from the office PC even when signed in as the owner. The price half
 // would 403 there for an Office user too.
+//
+// Add product lives here too (not just the office catalog screen): the owner can
+// create a product AND set its category / UoM / pack / price in one pass, instead
+// of adding it in the office catalog and then coming here to classify and price
+// it. It reuses the same two office-gated endpoints - POST /api/inventory (which
+// also sets the initial price) then PUT .../classification - which both pass from
+// an owner device. The office catalog's simpler Add (RawMaterial, pack 1) stays
+// for office staff who aren't the owner.
 export function Classify() {
   const { data, loading, error, reload } = useApi<InventoryRow[]>('/api/inventory')
   const [search, setSearch] = useState('')
   const [editing, setEditing] = useState<string | null>(null)
   const [draft, setDraft] = useState<InventoryRow | null>(null)
+  const [adding, setAdding] = useState(false)
+  const [addDraft, setAddDraft] = useState<AddDraft>(emptyAddDraft())
+  const [skuTouched, setSkuTouched] = useState(false)
+  // Set once the POST half of an add succeeds. It survives a failed classification
+  // PUT so a retry re-issues only the (idempotent) PUT against this SKU instead of
+  // POSTing again - a second POST would 409, auto-number, and orphan the first row
+  // as an unclassified duplicate.
+  const [pendingSku, setPendingSku] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [saveError, setSaveError] = useState('')
   const [notice, setNotice] = useState('')
@@ -40,10 +77,110 @@ export function Classify() {
   }, [data, search])
 
   function startEdit(row: InventoryRow) {
+    setAdding(false)
     setEditing(row.sku)
     setDraft({ ...row })
     setSaveError('')
     setNotice('')
+  }
+
+  function startAdd() {
+    setEditing(null)
+    setDraft(null)
+    setAdding(true)
+    setAddDraft(emptyAddDraft())
+    setSkuTouched(false)
+    setPendingSku(null)
+    setSaveError('')
+    setNotice('')
+  }
+
+  function cancelAdd() {
+    setAdding(false)
+    setPendingSku(null)
+  }
+
+  // In add mode the SKU auto-fills from brand+item until the user edits it by
+  // hand (mirrors the office catalog's Add), then leaves it alone.
+  function setAddBrand(v: string) {
+    setAddDraft((d) => ({ ...d, brand: v, sku: skuTouched ? d.sku : generateSku(v, d.baseName) }))
+  }
+  function setAddBaseName(v: string) {
+    setAddDraft((d) => ({ ...d, baseName: v, sku: skuTouched ? d.sku : generateSku(d.brand, v) }))
+  }
+
+  async function saveAdd() {
+    setSaveError('')
+    setNotice('')
+    if (!addDraft.baseName.trim()) return setSaveError('Item name is required.')
+    const price = Number(addDraft.price || '0')
+    if (!(price >= 0)) return setSaveError('Price cannot be negative.')
+    const pack = Number(addDraft.packMultiplier || '1')
+    if (!(pack > 0)) return setSaveError('Pack size must be greater than zero.')
+    const base = (skuTouched && addDraft.sku.trim() ? addDraft.sku : generateSku(addDraft.brand, addDraft.baseName))
+      .toLowerCase()
+      .trim()
+    if (!base) return setSaveError('Enter a brand or item name so a SKU can be generated.')
+
+    setBusy(true)
+    // Two office-gated calls, so a half-create is a real outcome: POST creates the
+    // product (as RawMaterial, pack 1, with the price) and the classification PUT
+    // then applies category/UoM/pack. If the PUT fails after the POST succeeded,
+    // `pendingSku` holds the created SKU so this retry skips straight to the PUT -
+    // re-POSTing would 409, auto-number, and leave the first row behind as an
+    // unclassified duplicate.
+    let createdSku = pendingSku
+    try {
+      if (!createdSku) {
+        createdSku = await addWithUniqueSku(base, toProperCase(addDraft.brand), toProperCase(addDraft.baseName), price)
+        setPendingSku(createdSku)
+      }
+      const uom = addDraft.uom.trim()
+      // Only touch classification when it differs from the POST defaults - skips a
+      // needless call for a plain RawMaterial, pack-1 add.
+      if (addDraft.category !== 'RawMaterial' || uom || pack !== 1) {
+        await api.put(`/api/inventory/${encodeURIComponent(createdSku)}/classification`, {
+          category: addDraft.category,
+          uom: uom ? uom : null,
+          packMultiplier: pack,
+        })
+      }
+      setNotice(
+        createdSku === base
+          ? `Added ${createdSku}.`
+          : `Added ${createdSku} — a product with SKU "${base}" already existed, so it was auto-numbered. Check it isn't a duplicate.`,
+      )
+      setPendingSku(null)
+      setAdding(false)
+      reload()
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Save failed.'
+      setSaveError(
+        createdSku
+          ? `${createdSku} was created as RawMaterial (pack 1) with the price, but setting its category, unit and pack size failed: ${message} — click “Add product” to retry (it won’t create a duplicate), or Cancel and finish it in the edit row below.`
+          : message,
+      )
+      reload() // the product may have been created; show what's actually stored
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // The generated SKU is a readable stem, not a unique key. On a 409 (Duplicate
+  // SKU) append -2, -3, ... until the server accepts one, exactly as the office
+  // catalog's Add does. Returns the SKU that stuck.
+  async function addWithUniqueSku(base: string, brand: string, baseName: string, price: number): Promise<string> {
+    for (let n = 1; n <= 99; n++) {
+      const sku = n === 1 ? base : `${base}-${n}`
+      try {
+        await api.post('/api/inventory', { sku, brand, baseName, price, isActive: true })
+        return sku
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 409) continue
+        throw err
+      }
+    }
+    throw new Error('Could not find a free SKU after 99 tries — set one manually.')
   }
 
   async function save() {
@@ -138,19 +275,97 @@ export function Classify() {
       </p>
 
       <div className="toolbar">
-        <label className="inline">
-          Search
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="brand or item"
-          />
-        </label>
-        <span className="muted">{rows ? `${rows.length} of ${data?.length ?? 0} items` : ''}</span>
+        <button className="btn primary" onClick={startAdd} disabled={busy}>
+          Add product
+        </button>
       </div>
 
       {saveError && <p className="error">{saveError}</p>}
       {notice && <p className="notice">{notice}</p>}
+
+      {adding && (
+        <div className="editor">
+          <h2>Add product</h2>
+          <div className="toolbar">
+            <label className="inline">
+              Brand
+              <input value={addDraft.brand} onChange={(e) => setAddBrand(e.target.value)} placeholder="Optional" />
+            </label>
+            <label className="inline">
+              Item name
+              <input value={addDraft.baseName} onChange={(e) => setAddBaseName(e.target.value)} />
+            </label>
+            <label className="inline">
+              SKU
+              <input
+                value={addDraft.sku}
+                onChange={(e) => {
+                  setSkuTouched(true)
+                  setAddDraft((d) => ({ ...d, sku: e.target.value }))
+                }}
+                placeholder="auto"
+              />
+            </label>
+          </div>
+          <div className="toolbar">
+            <label className="inline">
+              Category
+              <select
+                value={addDraft.category}
+                onChange={(e) =>
+                  setAddDraft((d) => ({ ...d, category: e.target.value as InventoryRow['category'] }))
+                }
+              >
+                {CATEGORIES.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="inline">
+              Unit of measure
+              <input
+                value={addDraft.uom}
+                onChange={(e) => setAddDraft((d) => ({ ...d, uom: e.target.value }))}
+                placeholder="e.g. Sack (25kg)"
+              />
+            </label>
+            <label className="inline">
+              Base units per pack
+              <input
+                type="number"
+                min={1}
+                step="any"
+                value={addDraft.packMultiplier}
+                onChange={(e) => setAddDraft((d) => ({ ...d, packMultiplier: e.target.value }))}
+              />
+            </label>
+            <label className="inline">
+              Selling price
+              <input
+                type="number"
+                min={0}
+                step="0.01"
+                value={addDraft.price}
+                onChange={(e) => setAddDraft((d) => ({ ...d, price: e.target.value }))}
+              />
+            </label>
+          </div>
+          <p className="entry-hint muted">
+            Leave the price at zero for anything the counter shouldn’t sell. Pack size is the
+            purchase-time conversion only — everything downstream stays in base units.
+          </p>
+          <div className="toolbar">
+            <button className="btn primary" onClick={() => void saveAdd()} disabled={busy}>
+              {busy ? 'Saving…' : 'Add product'}
+            </button>
+            <button className="btn neutral" onClick={cancelAdd} disabled={busy}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
 
       {draft && editing && (
         <div className="editor">
@@ -217,6 +432,18 @@ export function Classify() {
           </div>
         </div>
       )}
+
+      <div className="toolbar">
+        <label className="inline">
+          Search
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="brand or item"
+          />
+        </label>
+        <span className="muted">{rows ? `${rows.length} of ${data?.length ?? 0} items` : ''}</span>
+      </div>
 
       <DataTable
         columns={columns}

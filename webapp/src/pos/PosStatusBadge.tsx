@@ -1,7 +1,10 @@
 // Status indicator for the web POS (webapp-pos-plan.md Increment 5): OFFLINE /
-// SYNCING / SYNCED / SYNC ERROR / SIGN-IN-TO-SYNC. Auth mode takes priority
-// over sync status when both apply - "sign in when convenient" is the
-// actionable thing to tell the cashier, not the sync plumbing underneath it.
+// SYNCING / SYNCED / SYNC ERROR / SIGN-IN-TO-SYNC. The live sync truth
+// (syncing / sync-error / offline) is shown FIRST when it applies, so a real
+// network outage or storage failure is never masked as "sign in" - a signed-out
+// but offline till reads OFFLINE, not SIGN-IN TO SYNC (you can't sign in with no
+// network anyway). The signin-required hint shows only once the sync path is
+// otherwise healthy, where "sign in when convenient" is the actionable thing.
 import type { PosAuthMode } from './posAuth'
 import type { PosSyncStatus } from './syncEngine'
 
@@ -15,10 +18,7 @@ export function PosStatusBadge({ authMode, syncStatus, pendingCount }: Props) {
   let label: string
   let tone: 'ok' | 'warn' | 'error' | 'neutral'
 
-  if (authMode === 'signin-required') {
-    label = 'SIGN-IN TO SYNC'
-    tone = 'warn'
-  } else if (syncStatus === 'syncing') {
+  if (syncStatus === 'syncing') {
     label = 'SYNCING…'
     tone = 'neutral'
   } else if (syncStatus === 'sync-error') {
@@ -26,6 +26,9 @@ export function PosStatusBadge({ authMode, syncStatus, pendingCount }: Props) {
     tone = 'error'
   } else if (syncStatus === 'offline' || authMode === 'offline') {
     label = 'OFFLINE'
+    tone = 'warn'
+  } else if (authMode === 'signin-required') {
+    label = 'SIGN-IN TO SYNC'
     tone = 'warn'
   } else if (syncStatus === 'synced') {
     label = 'SYNCED'

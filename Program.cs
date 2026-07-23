@@ -1520,23 +1520,33 @@ app.MapPost("/api/sales", async (List<PosSaleDto> sales, HttpContext http) =>
             }
 
             // Every product line must reference a real, active SKU - the POS catalog cache
-            // should make this impossible, so a miss means a stale/hand-built payload.
+            // should make this impossible, so a miss means a stale/hand-built payload. While
+            // here, capture each SKU's CURRENT selling price so the line can record it below:
+            // a sale rung at a stale cached price (the POS caches the catalog, and the owner
+            // may change a price afterward) is then detectable instead of committing silently
+            // (bug-track.md #98). Row presence - not the price value - is the existence check,
+            // since inventory.price is nullable; a NULL-priced row exists but records no price.
+            var catalogPrices = new Dictionary<string, decimal>();
             foreach (var line in sale.Lines.Where(l => l.SKU != null))
             {
-                int known = await db.ExecuteScalarAsync<int>(
-                    "SELECT COUNT(*) FROM inventory WHERE sku = @SKU AND is_active = true", new { line.SKU }, tx);
-                if (known == 0) throw new Exception($"Unknown or inactive SKU '{line.SKU}'.");
+                var priceRows = (await db.QueryAsync<decimal?>(
+                    "SELECT price FROM inventory WHERE sku = @SKU AND is_active = true", new { line.SKU }, tx)).ToList();
+                if (priceRows.Count == 0) throw new Exception($"Unknown or inactive SKU '{line.SKU}'.");
+                if (priceRows[0].HasValue) catalogPrices[line.SKU!] = priceRows[0]!.Value;
             }
 
             int nextLocalId = await db.ExecuteScalarAsync<int>(
                 "SELECT COALESCE(MAX(local_id), 0) FROM pos_sales WHERE branch_name = @Branch", new { sale.Branch }, tx) + 1;
 
             await db.ExecuteAsync(@"
-                INSERT INTO pos_sales (branch_name, local_id, client_sale_id, staff_name, sold_at, total_amount)
-                VALUES (@Branch, @LocalId, @ClientSaleId, @StaffName, @SoldAt, @TotalAmount)",
-                new { sale.Branch, LocalId = nextLocalId, sale.ClientSaleId, sale.StaffName, sale.SoldAt, sale.TotalAmount }, tx);
+                INSERT INTO pos_sales (branch_name, local_id, client_sale_id, staff_name, sold_at, total_amount, payment_method)
+                VALUES (@Branch, @LocalId, @ClientSaleId, @StaffName, @SoldAt, @TotalAmount, @PaymentMethod)",
+                new { sale.Branch, LocalId = nextLocalId, sale.ClientSaleId, sale.StaffName, sale.SoldAt, sale.TotalAmount,
+                      // Old WinForms POS clients never send PaymentMethod -> default to Cash.
+                      PaymentMethod = string.IsNullOrWhiteSpace(sale.PaymentMethod) ? "Cash" : sale.PaymentMethod!.Trim() }, tx);
 
             int totalShortfall = 0;
+            bool priceVariance = false;
             foreach (var line in sale.Lines)
             {
                 int shortfall = 0;
@@ -1570,19 +1580,35 @@ app.MapPost("/api/sales", async (List<PosSaleDto> sales, HttpContext http) =>
                     totalShortfall += shortfall;
                 }
 
+                // Server's current price for this SKU (null on discount lines, and on any SKU
+                // whose inventory.price is NULL). Recorded per line so stale-price sales are
+                // visible for reconciliation; a mismatch is warned-not-rejected below - an
+                // offline sale legitimately predates a price change, and rejecting would drop
+                // real revenue (bug-track.md #98).
+                decimal? catalogPrice = line.SKU != null && catalogPrices.TryGetValue(line.SKU, out var cp) ? cp : (decimal?)null;
+                if (catalogPrice != null && Math.Abs(line.UnitPrice - catalogPrice.Value) > 0.01m) priceVariance = true;
+
                 await db.ExecuteAsync(@"
-                    INSERT INTO pos_sale_lines (branch_name, client_sale_id, sku, description, qty, unit_price, line_total, shortfall_qty, consumed_cost)
-                    VALUES (@Branch, @ClientSaleId, @SKU, @Description, @Qty, @UnitPrice, @LineTotal, @Shortfall, @ConsumedCost)",
+                    INSERT INTO pos_sale_lines (branch_name, client_sale_id, sku, description, qty, unit_price, line_total, shortfall_qty, consumed_cost, catalog_price)
+                    VALUES (@Branch, @ClientSaleId, @SKU, @Description, @Qty, @UnitPrice, @LineTotal, @Shortfall, @ConsumedCost, @CatalogPrice)",
                     new { sale.Branch, sale.ClientSaleId, line.SKU, line.Description, line.Qty, line.UnitPrice, line.LineTotal,
-                          Shortfall = shortfall, ConsumedCost = consumedCost }, tx);
+                          Shortfall = shortfall, ConsumedCost = consumedCost, CatalogPrice = catalogPrice }, tx);
             }
 
             await tx.CommitAsync();
+            var notes = new List<string>();
+            if (totalShortfall > 0) notes.Add($"Stock short by {totalShortfall} across the sale - record baking/decorating.");
+            // Warn-not-reject: the sale is committed at the price the customer was charged;
+            // this note just surfaces that a line differs from the current catalogue price
+            // (a price change after the POS cached its catalog). The per-line catalog_price
+            // column above is the durable record for reconciliation. Status stays
+            // Synced/SyncedWithShortfall - no new wire status, so old clients are unaffected.
+            if (priceVariance) notes.Add("One or more lines sold at a price that differs from the current catalogue price.");
             results.Add(new PosSaleSyncResult
             {
                 ClientSaleId = sale.ClientSaleId,
                 Status = totalShortfall > 0 ? "SyncedWithShortfall" : "Synced",
-                Detail = totalShortfall > 0 ? $"Stock short by {totalShortfall} across the sale - record baking/decorating." : ""
+                Detail = string.Join(" ", notes)
             });
         }
         catch (PostgresException ex) when (ex.SqlState == "23505")
@@ -1611,7 +1637,7 @@ app.MapGet("/api/sales", async (string branch, DateTime start, DateTime end, Htt
     using var db = new NpgsqlConnection(connectionString);
     var sql = @"
         SELECT s.local_id AS LocalId, s.client_sale_id AS ClientSaleId, s.staff_name AS StaffName,
-               s.sold_at AS SoldAt, s.total_amount AS TotalAmount, s.voided AS Voided,
+               s.sold_at AS SoldAt, s.total_amount AS TotalAmount, s.voided AS Voided, s.payment_method AS PaymentMethod,
                COALESCE((SELECT SUM(l.shortfall_qty) FROM pos_sale_lines l
                          WHERE l.branch_name = s.branch_name AND l.client_sale_id = s.client_sale_id), 0) > 0 AS HasShortfall
         FROM pos_sales s
@@ -1646,9 +1672,10 @@ app.MapGet("/api/sales/lines", async (string branch, DateTime start, DateTime en
     using var db = new NpgsqlConnection(connectionString);
     var sql = @"
         SELECT s.local_id AS SaleNo, s.client_sale_id AS ClientSaleId, s.sold_at AS SoldAt,
-               s.staff_name AS StaffName, s.voided AS Voided,
+               s.staff_name AS StaffName, s.voided AS Voided, s.payment_method AS PaymentMethod,
                l.sku AS SKU, l.description AS Description, l.qty AS Qty,
-               l.unit_price AS UnitPrice, l.line_total AS LineTotal, l.shortfall_qty AS ShortfallQty
+               l.unit_price AS UnitPrice, l.line_total AS LineTotal, l.shortfall_qty AS ShortfallQty,
+               l.catalog_price AS CatalogPrice
         FROM pos_sales s
         JOIN pos_sale_lines l
           ON l.branch_name = s.branch_name AND l.client_sale_id = s.client_sale_id
@@ -1916,6 +1943,7 @@ public class PosSaleDto
     public string StaffName { get; set; } = string.Empty;
     public DateTime SoldAt { get; set; } // counter time, not sync time
     public decimal TotalAmount { get; set; }
+    public string? PaymentMethod { get; set; } // Cash (default if null - old WinForms clients never send it), GCash, GCash Terminal, Foodpanda
     public List<PosSaleLineDto> Lines { get; set; } = new();
 }
 
@@ -1933,6 +1961,7 @@ public class PosSaleSummaryRow
     public string StaffName { get; set; } = string.Empty;
     public DateTime SoldAt { get; set; }
     public decimal TotalAmount { get; set; }
+    public string PaymentMethod { get; set; } = "Cash";
     public bool HasShortfall { get; set; }
     public bool Voided { get; set; }
 }
@@ -1945,12 +1974,14 @@ public class PosSaleLineExportRow
     public DateTime SoldAt { get; set; }
     public string StaffName { get; set; } = string.Empty;
     public bool Voided { get; set; }
+    public string PaymentMethod { get; set; } = "Cash";
     public string? SKU { get; set; }
     public string Description { get; set; } = string.Empty;
     public int Qty { get; set; }
     public decimal UnitPrice { get; set; }
     public decimal LineTotal { get; set; }
     public int ShortfallQty { get; set; }
+    public decimal? CatalogPrice { get; set; } // server price at sync time; null for discount lines / pre-009 rows
 }
 
 public class VoidSaleDto

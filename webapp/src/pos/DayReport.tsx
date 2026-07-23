@@ -1,39 +1,26 @@
 // Printable daily sales report for the web POS (webapp-pos-plan.md Increment 7),
-// the browser analogue of SKC Branch's frmSalesReport. A per-sale list + a
-// signed-off summary for a date range (defaulting to today), printed via
-// window.print() with a print-only layout (see pos.css @media print). NOT a
-// customer receipt. CSV export (per-item lines) is server-only and blocked when
-// the on-screen rows came from the offline fallback. The whole `.pos-report-doc`
-// is a WYSIWYG preview of exactly what prints.
+// the browser analogue of SKC Branch's frmSalesReport. An items-sold tally (which
+// products moved, and how many) + a signed-off summary for a date range
+// (defaulting to today), printed via window.print() with a print-only layout
+// (see pos.css @media print). NOT a customer receipt. CSV export (per-item lines,
+// one row per sale) is server-only and blocked when the on-screen data came from
+// the offline fallback. The whole `.pos-report-doc` is a WYSIWYG preview of
+// exactly what prints.
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { formatCentavos } from './money'
 import { localDate, localTimestamp } from '../lib/format'
-import type { ReportFlag, ReportRow } from './reportStore'
-import { buildCsv, fetchSaleLines, loadReport, summarize } from './reportStore'
+import type { ItemTally, ReportRow } from './reportStore'
+import { buildCsv, fetchSaleLines, loadReport, summarize, tallyTotalCentavos } from './reportStore'
 
 function peso(centavos: number): string {
   return `₱${formatCentavos(centavos)}`
-}
-
-// soldAt is server ISO ('T') or local wall-clock (space); split on either and
-// drop the seconds - textually, never through Date (lib/format RULE 1).
-function soldStamp(soldAt: string): string {
-  const [date, rest = ''] = soldAt.split(/[T ]/)
-  const hhmm = rest.slice(0, 5)
-  return hhmm ? `${date} ${hhmm}` : date
-}
-
-const FLAG_TONE: Record<Exclude<ReportFlag, ''>, string> = {
-  VOIDED: 'muted',
-  REJECTED: 'muted',
-  SHORTFALL: 'warn',
-  UNSYNCED: 'warn',
 }
 
 export function DayReport({ branch }: { branch: string }) {
   const [start, setStart] = useState(localDate())
   const [end, setEnd] = useState(localDate())
   const [rows, setRows] = useState<ReportRow[] | null>(null)
+  const [tally, setTally] = useState<ItemTally[]>([])
   const [offline, setOffline] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -56,6 +43,7 @@ export function DayReport({ branch }: { branch: string }) {
       try {
         const res = await loadReport(branch, s, e)
         setRows(res.rows)
+        setTally(res.tally)
         setOffline(res.offline)
         setLoadedStart(s)
         setLoadedEnd(e)
@@ -198,28 +186,33 @@ export function DayReport({ branch }: { branch: string }) {
           <p className="pos-report-empty">{loading ? 'Loading…' : ' '}</p>
         ) : rows.length === 0 ? (
           <p className="pos-report-empty">No sales in this {loadedStart === loadedEnd ? 'day' : 'range'}.</p>
+        ) : tally.length === 0 ? (
+          <p className="pos-report-empty">No items sold — every sale in this {loadedStart === loadedEnd ? 'day' : 'range'} was voided.</p>
         ) : (
-          <table className="pos-report-table">
+          <table className="pos-report-table pos-report-tally">
             <thead>
               <tr>
-                <th className="c-no">No.</th>
-                <th className="c-time">Date &amp; time</th>
-                <th className="c-cashier">Cashier</th>
-                <th className="c-total">Total</th>
-                <th className="c-flag">Flag</th>
+                <th className="c-item">Item</th>
+                <th className="c-qty">Qty</th>
+                <th className="c-total">Value</th>
               </tr>
             </thead>
             <tbody>
-              {rows.map((r, i) => (
-                <tr key={r.no || `local-${i}`} className={r.flag ? `flag-${FLAG_TONE[r.flag]}` : undefined}>
-                  <td className="c-no">{r.no || '—'}</td>
-                  <td className="c-time">{soldStamp(r.soldAt)}</td>
-                  <td className="c-cashier">{r.cashier || '—'}</td>
-                  <td className="c-total">{peso(r.totalCentavos)}</td>
-                  <td className="c-flag">{r.flag}</td>
+              {tally.map((t) => (
+                <tr key={t.key} className={t.isDiscount ? 'flag-muted' : undefined}>
+                  <td className="c-item">{t.description}</td>
+                  <td className="c-qty">{t.isDiscount ? '—' : t.qty}</td>
+                  <td className="c-total">{peso(t.valueCentavos)}</td>
                 </tr>
               ))}
             </tbody>
+            <tfoot>
+              <tr className="pos-report-tally-total">
+                <td className="c-item">Total</td>
+                <td className="c-qty" />
+                <td className="c-total">{peso(tallyTotalCentavos(tally))}</td>
+              </tr>
+            </tfoot>
           </table>
         )}
 

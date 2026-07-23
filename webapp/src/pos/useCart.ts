@@ -95,9 +95,13 @@ export function useCart() {
     return null
   }
 
+  // Clears the cart for the next sale but deliberately KEEPS staffName: the only
+  // caller is SaleScreen's submit, and at a counter the same cashier rings many
+  // consecutive sales, so wiping the name every time forced a re-type on each
+  // one. The name persists until the operator edits the field (e.g. a shift
+  // change), matching how POS terminals hold the signed-in cashier across sales.
   function reset() {
     setLines([])
-    setStaffName('')
     setTenderedCentavos(null)
   }
 

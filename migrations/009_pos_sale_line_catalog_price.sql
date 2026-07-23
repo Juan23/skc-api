@@ -1,0 +1,22 @@
+-- ====================================================================
+-- Migration 009: POS sale-line catalog-price snapshot (idempotent)
+-- Run: psql "$CONNECTION_STRING" -f migrations/009_pos_sale_line_catalog_price.sql
+-- ====================================================================
+
+-- Records the server's current inventory.price for each product line at the
+-- moment it syncs, so a sale rung at a STALE cached price is detectable rather
+-- than committing silently. The POS caches the catalogue and the owner may
+-- change a price afterward (or a sale sits offline across a price change), and
+-- the only prior cross-check was intra-payload (sum == total), which a
+-- stale-but-consistent payload passes. Variance = unit_price - catalog_price,
+-- computed by whoever reads it; the server NEVER rejects on it (an offline sale
+-- legitimately predates a price change - rejecting would drop real revenue).
+-- See bug-track.md #98.
+--
+-- Nullable, NO default: NULL means "not captured" - it is null for discount
+-- lines (no SKU), for any SKU whose inventory.price is itself NULL, and for
+-- every row written by the currently-deployed API before this column existed.
+-- Because it's nullable with no default, the pre-redeploy API's INSERT into
+-- pos_sale_lines (which omits this column) keeps working against the
+-- post-migration schema during the migrate-before-redeploy window.
+ALTER TABLE pos_sale_lines ADD COLUMN IF NOT EXISTS catalog_price NUMERIC(18, 2);

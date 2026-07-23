@@ -20,6 +20,7 @@ export interface DayLogEntry {
   soldAt: string
   staffName: string
   totalCentavos: number
+  paymentMethod: string // Cash | GCash | GCash Terminal | Foodpanda
   // Line detail is present for sales this device rang (from either local
   // store); null for a sale that only reached us via the server refresh (rung
   // on another till of the same branch) - the header is still shown and it can
@@ -61,6 +62,7 @@ export async function loadTodayLocal(branch: string): Promise<DayLogEntry[]> {
       soldAt: p.soldAt,
       staffName: p.staffName,
       totalCentavos: p.totalCentavos,
+      paymentMethod: p.paymentMethod ?? 'Cash',
       lines: p.lines,
       status: p.syncState === 'error' ? 'error' : 'pending',
       synced: false,
@@ -77,6 +79,7 @@ export async function loadTodayLocal(branch: string): Promise<DayLogEntry[]> {
       soldAt: s.soldAt,
       staffName: s.staffName,
       totalCentavos: s.totalCentavos,
+      paymentMethod: s.paymentMethod ?? 'Cash',
       lines: s.lines,
       status: voided ? 'voided' : s.status === 'SyncedWithShortfall' ? 'shortfall' : 'synced',
       synced: true,
@@ -104,6 +107,20 @@ async function markLocalVoided(clientSaleId: string): Promise<void> {
   }
 }
 
+// Persist a server-reported shortfall into the local syncedLog. Needed because a
+// sale whose sync response was lost gets re-pushed and comes back 'AlreadySynced'
+// (the server's idempotency path doesn't re-report the shortfall), so its local
+// row settles as plain 'Synced' even though the server holds a shortfall. Never
+// downgrades a void and never rewrites an already-flagged row, so it's a safe
+// no-op once the row is correct.
+async function markLocalShortfall(clientSaleId: string): Promise<void> {
+  const db = await getDb()
+  const row = await db.get('syncedLog', clientSaleId)
+  if (row && row.status !== 'Voided' && row.status !== 'SyncedWithShortfall') {
+    await db.put('syncedLog', { ...row, status: 'SyncedWithShortfall' })
+  }
+}
+
 // Reconcile the local today-list against the server's authoritative rows.
 // Throws on a network failure so the caller can fall back to the local view
 // unchanged (the whole point of offline-first). Two things happen:
@@ -127,6 +144,13 @@ export async function reconcileWithServer(branch: string): Promise<DayLogEntry[]
         await markLocalVoided(r.clientSaleId)
         existing.voided = true
         existing.status = 'voided'
+      } else if (r.hasShortfall && existing.synced && !existing.voided && existing.status !== 'shortfall') {
+        // Server recorded a shortfall this local row doesn't reflect (a re-pushed
+        // sale came back 'AlreadySynced', losing the flag). Void wins over
+        // shortfall, so this is an else-if. Only upgrade a synced row - a
+        // still-pending one is the sync engine's job to resolve first.
+        await markLocalShortfall(r.clientSaleId)
+        existing.status = 'shortfall'
       }
     } else {
       // Rung on another till of this branch - we have no lines for it.
@@ -135,6 +159,7 @@ export async function reconcileWithServer(branch: string): Promise<DayLogEntry[]
         soldAt: r.soldAt,
         staffName: r.staffName ?? '',
         totalCentavos: Math.round(r.totalAmount * 100),
+        paymentMethod: r.paymentMethod ?? 'Cash',
         lines: null,
         status: r.voided ? 'voided' : r.hasShortfall ? 'shortfall' : 'synced',
         synced: true,

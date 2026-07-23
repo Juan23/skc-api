@@ -34,6 +34,7 @@ export interface PendingSale {
   totalCentavos: number
   tenderedCentavos: number
   changeCentavos: number
+  paymentMethod: string // Cash | GCash | GCash Terminal | Foodpanda
   syncState: SyncState
   syncError?: string
 }
@@ -47,6 +48,7 @@ export interface SyncedSale {
   totalCentavos: number
   tenderedCentavos: number
   changeCentavos: number
+  paymentMethod: string // Cash | GCash | GCash Terminal | Foodpanda
   status: 'Synced' | 'SyncedWithShortfall' | 'AlreadySynced' | 'Voided'
   syncedAt: string
 }

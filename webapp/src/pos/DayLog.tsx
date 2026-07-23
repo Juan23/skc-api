@@ -229,6 +229,9 @@ export function DayLog({
               </span>
             </div>
             <p className="muted">Cashier: {selected.staffName || '—'}</p>
+            {selected.paymentMethod && selected.paymentMethod !== 'Cash' && (
+              <p className="muted">Paid via: {selected.paymentMethod}</p>
+            )}
 
             {selected.lines == null ? (
               <p className="muted">Rung on another till - item detail isn&rsquo;t on this device.</p>

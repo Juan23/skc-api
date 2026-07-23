@@ -173,6 +173,7 @@ CREATE TABLE IF NOT EXISTS pos_sales (
     staff_name VARCHAR(100) NOT NULL,
     sold_at TIMESTAMP WITHOUT TIME ZONE NOT NULL,   -- counter time, not sync time (offline sales sync late)
     total_amount NUMERIC(18, 2) NOT NULL,
+    payment_method VARCHAR(50) NOT NULL DEFAULT 'Cash', -- Cash, GCash, GCash Terminal, Foodpanda, ... (client-controlled set, no CHECK)
     voided BOOLEAN NOT NULL DEFAULT FALSE,          -- a voided sale is restocked and flagged, never deleted
     voided_at TIMESTAMP WITHOUT TIME ZONE,
     voided_by VARCHAR(100),
@@ -197,7 +198,8 @@ CREATE TABLE IF NOT EXISTS pos_sale_lines (
     unit_price NUMERIC(18, 2) NOT NULL,
     line_total NUMERIC(18, 2) NOT NULL,
     shortfall_qty INTEGER NOT NULL DEFAULT 0,
-    consumed_cost NUMERIC(18, 4) NOT NULL DEFAULT 0
+    consumed_cost NUMERIC(18, 4) NOT NULL DEFAULT 0,
+    catalog_price NUMERIC(18, 2)   -- server selling price at sync time; NULL for discount lines / pre-009 rows (see migrations/009). Warn-not-reject stale-price detection.
 );
 
 CREATE INDEX IF NOT EXISTS idx_pos_sale_lines_sale ON pos_sale_lines(branch_name, client_sale_id);

@@ -18,6 +18,20 @@ const SYNC_INTERVAL_MS = 60_000
 
 export type PosSyncStatus = 'idle' | 'syncing' | 'offline' | 'synced' | 'sync-error'
 
+// The locally-stored soldAt is "YYYY-MM-DD HH:mm:ss" (a space separator, minted
+// by localTimestamp). System.Text.Json's DateTime binder only accepts ISO-8601,
+// so a space fails to bind and 400s the WHOLE batch (every sale stuck 'pending'
+// with a SYNC ERROR badge, not a per-sale Rejected). Swap the date/time
+// separator to 'T'. Returns null if the value isn't a valid ISO-local datetime,
+// so pushPendingSales can quarantine that one malformed sale instead of letting
+// it strand the entire queue. No timezone suffix: the server parses it
+// Unspecified and stores the exact counter wall-clock (see PendingSale.soldAt).
+const ISO_LOCAL_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?$/
+function toWireSoldAt(soldAt: string): string | null {
+  const iso = soldAt.trim().replace(' ', 'T')
+  return ISO_LOCAL_RE.test(iso) ? iso : null
+}
+
 function toWireDto(sale: PendingSale): PosSaleDto {
   const lines: PosSaleLineDto[] = sale.lines.map((l) => ({
     sku: l.sku,
@@ -30,17 +44,14 @@ function toWireDto(sale: PendingSale): PosSaleDto {
     clientSaleId: sale.clientSaleId,
     branch: sale.branch,
     staffName: sale.staffName,
-    // sale.soldAt is local wall-clock "YYYY-MM-DD HH:mm:ss" (a space, minted by
-    // localTimestamp). The server's PosSaleDto.SoldAt is a DateTime, and
-    // System.Text.Json only accepts ISO-8601 - a space separator fails to bind
-    // and 400s the WHOLE batch (every sale stuck 'pending' with a SYNC ERROR
-    // badge, not a per-sale Rejected). Send the 'T' form on the wire. No
-    // timezone suffix, so the server parses it Unspecified and stores the exact
-    // counter wall-clock into sold_at (timestamp without time zone) - matching
-    // "counter time, not sync time" with no offset shift. The locally-stored
-    // value keeps its space form; the day log's soldParts() reads either.
-    soldAt: sale.soldAt.replace(' ', 'T'),
+    // Normalized to ISO-8601 by toWireSoldAt above. pushPendingSales has already
+    // filtered out any sale whose soldAt can't be normalized, so the ?? fallback
+    // is never hit in practice - it's belt-and-braces. The locally-stored value
+    // keeps its space form; the day log's soldParts() reads either.
+    soldAt: toWireSoldAt(sale.soldAt) ?? sale.soldAt.replace(' ', 'T'),
     totalAmount: centavosToWireNumber(sale.totalCentavos),
+    // ?? 'Cash' covers any pending rows written before payment_method existed.
+    paymentMethod: sale.paymentMethod ?? 'Cash',
     lines,
   }
 }
@@ -69,6 +80,7 @@ async function movePendingToSyncedLog(clientSaleId: string, status: PosSaleSyncR
       totalCentavos: pending.totalCentavos,
       tenderedCentavos: pending.tenderedCentavos,
       changeCentavos: pending.changeCentavos,
+      paymentMethod: pending.paymentMethod ?? 'Cash',
       status: status as 'Synced' | 'SyncedWithShortfall' | 'AlreadySynced',
       syncedAt: localTimestamp(),
     })
@@ -94,7 +106,23 @@ async function pushPendingSales(): Promise<{ ok: boolean; offline: boolean }> {
   const all = await db.getAllFromIndex('pendingSales', 'bySyncState', 'pending')
   if (all.length === 0) return { ok: true, offline: false }
 
-  const dtos = all.map(toWireDto)
+  // Quarantine any sale whose soldAt can't be normalized to a valid ISO-local
+  // datetime BEFORE it reaches the wire: System.Text.Json 400s the ENTIRE batch
+  // on a single unbindable DateTime, which would strand every queued sale with a
+  // SYNC ERROR badge. localTimestamp always mints a valid value, so a bad one is
+  // a genuine data defect - mark it terminal ('needs office attention') rather
+  // than retrying it forever, and let its siblings sync unaffected.
+  const sendable: PendingSale[] = []
+  for (const sale of all) {
+    if (toWireSoldAt(sale.soldAt) === null) {
+      await markTerminalRejection(sale.clientSaleId, `Invalid sale timestamp "${sale.soldAt}" - needs office attention.`)
+    } else {
+      sendable.push(sale)
+    }
+  }
+  if (sendable.length === 0) return { ok: true, offline: false }
+
+  const dtos = sendable.map(toWireDto)
 
   async function post(): Promise<PosSaleSyncResult[]> {
     return api.post<PosSaleSyncResult[]>('/api/sales', dtos)
@@ -253,7 +281,18 @@ export function usePosSync({ branchName, onCatalogChanged }: UsePosSyncOptions):
   useEffect(() => {
     void runSync()
     const id = setInterval(() => void runSync(), SYNC_INTERVAL_MS)
-    return () => clearInterval(id)
+    // Proactive reconnect: the 60s interval is only a worst-case ceiling. When
+    // the device regains connectivity, drain the queue immediately instead of
+    // waiting for the next tick or the next rung sale - a till that dropped
+    // offline and came back with a full queue would otherwise sit unsynced for
+    // up to a minute. No 'offline' handler needed: a failed push already
+    // surfaces as offline, so there's nothing to do on the way down.
+    const onOnline = () => void runSync()
+    window.addEventListener('online', onOnline)
+    return () => {
+      clearInterval(id)
+      window.removeEventListener('online', onOnline)
+    }
   }, [runSync, branchName])
 
   return { status, pendingCount, lastError, triggerSync: () => void runSync() }

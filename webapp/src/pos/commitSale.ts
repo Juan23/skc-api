@@ -16,6 +16,7 @@ export interface SaleToCommit {
   totalCentavos: number
   tenderedCentavos: number | null
   changeCentavos: number | null
+  paymentMethod: string
 }
 
 export async function commitSale(sale: SaleToCommit, branch: string): Promise<PendingSale> {
@@ -30,6 +31,7 @@ export async function commitSale(sale: SaleToCommit, branch: string): Promise<Pe
     totalCentavos: sale.totalCentavos,
     tenderedCentavos: sale.tenderedCentavos ?? 0,
     changeCentavos: sale.changeCentavos ?? 0,
+    paymentMethod: sale.paymentMethod,
     syncState: 'pending',
   }
 

@@ -192,6 +192,13 @@
   margin: 0;
 }
 
+.pos-last-sale-method {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--slate);
+  margin: 0 0 4px;
+}
+
 .pos-line {
   display: flex;
   align-items: center;
@@ -409,6 +416,38 @@
 .pos-complete-btn:disabled {
   background: var(--silver);
   color: #fff;
+  cursor: default;
+}
+
+/* Cashless methods (GCash / GCash Terminal / Foodpanda) - secondary to the
+   primary green Complete-sale button, but each still rings the whole sale. */
+.pos-cashless-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.pos-cashless-btn {
+  height: 48px;
+  border-radius: 10px;
+  border: 2px solid var(--sea-green);
+  background: #fff;
+  color: var(--sea-green);
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+.pos-cashless-btn:hover {
+  background: var(--mint, #eaf7f1);
+}
+
+.pos-cashless-btn:disabled {
+  border-color: var(--silver);
+  color: var(--silver);
+  background: #fff;
   cursor: default;
 }
 
@@ -990,6 +1029,27 @@
 
 .pos-report-table tr.flag-warn td.c-flag {
   color: #a15c00;
+}
+
+/* Items-sold tally: Item | Qty | Value. Item takes the slack; Qty is a narrow
+   right-aligned numeric column; the tfoot Total is emphasised with a top rule. */
+.pos-report-tally .c-item {
+  width: auto;
+}
+
+.pos-report-tally .c-qty {
+  width: 72px;
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.pos-report-tally tfoot td {
+  padding: 8px;
+  border-top: 2px solid var(--slate);
+  border-bottom: none;
+  font-weight: 700;
+  font-size: 14px;
 }
 
 .pos-report-summary {

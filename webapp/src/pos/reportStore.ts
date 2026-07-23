@@ -36,9 +36,65 @@ export interface ReportSummary {
   unsyncedCount: number
 }
 
+// A per-product roll-up of everything sold in the range - what the owner reads
+// to see WHICH items moved (the per-sale rows only show sale totals). Built from
+// the same line data the CSV uses, so on-screen and CSV agree.
+export interface ItemTally {
+  key: string // sku for a product; a sentinel for the rolled-up discount row
+  description: string
+  qty: number
+  valueCentavos: number
+  isDiscount: boolean
+}
+
 export interface ReportLoad {
   rows: ReportRow[]
+  tally: ItemTally[]
   offline: boolean
+}
+
+// Aggregate item lines into a per-product tally. Discount lines (sku == null,
+// negative total) are rolled into a single "Discounts" row so the tally total
+// still reconciles to net gross. Products sort most-sold-first (qty desc, then
+// name); the discount row always sits last. Callers pass only lines of COUNTED
+// sales (voided/rejected already excluded) - a voided sale sold nothing.
+function tallyLines(
+  lines: { sku: string | null; description: string; qty: number; lineTotalCentavos: number }[],
+): ItemTally[] {
+  const products = new Map<string, ItemTally>()
+  let discountCentavos = 0
+  let discountCount = 0
+  for (const l of lines) {
+    if (l.sku == null) {
+      discountCentavos += l.lineTotalCentavos
+      discountCount += 1
+      continue
+    }
+    const existing = products.get(l.sku)
+    if (existing) {
+      existing.qty += l.qty
+      existing.valueCentavos += l.lineTotalCentavos
+    } else {
+      products.set(l.sku, {
+        key: l.sku,
+        description: l.description,
+        qty: l.qty,
+        valueCentavos: l.lineTotalCentavos,
+        isDiscount: false,
+      })
+    }
+  }
+  const rows = [...products.values()].sort((a, b) => b.qty - a.qty || (a.description < b.description ? -1 : 1))
+  if (discountCount > 0) {
+    rows.push({ key: '__discounts__', description: 'Discounts', qty: discountCount, valueCentavos: discountCentavos, isDiscount: true })
+  }
+  return rows
+}
+
+// Sum of every tally row = net gross of counted sales (products positive,
+// discounts negative), matching summarize().grossCentavos.
+export function tallyTotalCentavos(tally: ItemTally[]): number {
+  return tally.reduce((sum, t) => sum + t.valueCentavos, 0)
 }
 
 // Whole-centavo conversion so the summary sums integers, never IEEE doubles -
@@ -66,9 +122,13 @@ export async function loadReport(branch: string, startDate: string, endDate: str
   // wrongly deny the offline fallback right at the boundary.
   const today = localDate()
   try {
-    const sales = await api.get<SaleSummary[]>(
-      `/api/sales?branch=${encodeURIComponent(branch)}&start=${startDate}&end=${endOfDay(endDate)}`,
-    )
+    // Both come from the same server; fetch in parallel. /api/sales gives the
+    // per-sale rows + summary counts; /api/sales/lines gives the item detail the
+    // tally needs (the report used to fetch lines only at CSV-export time).
+    const [sales, lines] = await Promise.all([
+      api.get<SaleSummary[]>(`/api/sales?branch=${encodeURIComponent(branch)}&start=${startDate}&end=${endOfDay(endDate)}`),
+      fetchSaleLines(branch, startDate, endDate),
+    ])
     const rows: ReportRow[] = sales.map((s) => ({
       no: String(s.localId),
       soldAt: s.soldAt,
@@ -78,12 +138,25 @@ export async function loadReport(branch: string, startDate: string, endDate: str
       flag: s.voided ? 'VOIDED' : s.hasShortfall ? 'SHORTFALL' : '',
       counted: !s.voided,
     }))
-    return { rows: sortBySoldAt(rows), offline: false }
+    const tally = tallyLines(
+      lines
+        .filter((l) => !l.voided) // a voided sale sold nothing
+        .map((l) => ({ sku: l.sku, description: l.description, qty: l.qty, lineTotalCentavos: toCentavos(l.lineTotal) })),
+    )
+    return { rows: sortBySoldAt(rows), tally, offline: false }
   } catch (err) {
     if (startDate !== today || endDate !== today) throw err
     // Reuse the day log's local UNION (pendingSales + syncedLog, branch-scoped,
     // today-only) so the offline report matches the day log exactly.
     const local = await loadTodayLocal(branch)
+    // Tally from the local line detail (present for every locally-rung sale),
+    // over counted (non-voided, non-rejected) sales only.
+    const tally = tallyLines(
+      local
+        .filter((e) => e.status !== 'voided' && e.status !== 'error')
+        .flatMap((e) => e.lines ?? [])
+        .map((l) => ({ sku: l.sku, description: l.description, qty: l.qty, lineTotalCentavos: l.lineTotalCentavos })),
+    )
     const rows: ReportRow[] = local.map((e) => ({
       no: '', // the server assigns the sale no.; unsynced sales have none yet
       soldAt: e.soldAt,
@@ -102,7 +175,7 @@ export async function loadReport(branch: string, startDate: string, endDate: str
       // Rejected sales never counted server-side; voided ones were reversed.
       counted: e.status !== 'voided' && e.status !== 'error',
     }))
-    return { rows: sortBySoldAt(rows), offline: true }
+    return { rows: sortBySoldAt(rows), tally, offline: true }
   }
 }
 
@@ -133,7 +206,7 @@ export async function fetchSaleLines(branch: string, startDate: string, endDate:
 // so Excel doesn't mangle non-ASCII product/cashier names.
 export function buildCsv(lines: SaleLineExport[]): string {
   const esc = (v: string): string => (/[",\r\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v)
-  const out = ['SaleNo,Date,Time,Cashier,SKU,Item,Qty,UnitPrice,LineTotal,ShortfallQty,Voided']
+  const out = ['SaleNo,Date,Time,Cashier,PaymentMethod,SKU,Item,Qty,UnitPrice,LineTotal,ShortfallQty,Voided']
   for (const l of lines) {
     const [date, rest = ''] = l.soldAt.split(/[T ]/)
     out.push(
@@ -142,6 +215,7 @@ export function buildCsv(lines: SaleLineExport[]): string {
         date,
         rest.slice(0, 8),
         esc(l.staffName ?? ''),
+        esc(l.paymentMethod ?? 'Cash'),
         esc(l.sku ?? ''),
         esc(l.description ?? ''),
         String(l.qty),

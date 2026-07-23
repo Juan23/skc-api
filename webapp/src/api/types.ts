@@ -131,6 +131,7 @@ export interface SaleSummary {
   staffName: string | null
   soldAt: string
   totalAmount: number
+  paymentMethod: string
   voided: boolean
   hasShortfall: boolean
 }
@@ -153,12 +154,19 @@ export interface SaleLineExport {
   soldAt: string
   staffName: string
   voided: boolean
+  paymentMethod: string
   sku: string | null
   description: string
   qty: number
   unitPrice: number
   lineTotal: number
   shortfallQty: number
+  // Server's selling price for the SKU at sync time; null on discount lines and
+  // on rows written before migration 009. unitPrice != catalogPrice means the
+  // sale was rung at a stale cached price (the owner changed it after the POS
+  // cached its catalog) - recorded, never rejected. Not in the byte-compatible
+  // CSV export (buildSalesCsv/buildCsv list their columns explicitly).
+  catalogPrice: number | null
 }
 
 // POST /api/sales's write-side contract (webapp-pos-plan.md Increment 4) -
@@ -184,6 +192,7 @@ export interface PosSaleDto {
   staffName: string
   soldAt: string // counter time (localTimestamp()), not sync time
   totalAmount: number
+  paymentMethod: string // Cash | GCash | GCash Terminal | Foodpanda
   lines: PosSaleLineDto[]
 }
 

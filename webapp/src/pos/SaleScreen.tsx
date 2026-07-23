@@ -20,7 +20,14 @@ export interface CompletedSale {
   totalCentavos: number
   tenderedCentavos: number | null
   changeCentavos: number | null
+  paymentMethod: string
 }
+
+// The cashless methods the counter accepts, alongside the default Cash flow.
+// Tapping one rings the exact total (no change) and records the method. Adding
+// a new one here (e.g. 'Maya') is all that's needed client-side - the column is
+// a free VARCHAR with no server CHECK.
+const CASHLESS_METHODS = ['GCash', 'GCash Terminal', 'Foodpanda'] as const
 
 interface Props {
   catalog: InventoryRow[]
@@ -215,20 +222,23 @@ export function SaleScreen({ catalog, onComplete }: Props) {
   function addOne(product: InventoryRow) {
     setError('')
     setLastSale(null)
-    const already = cartQtyRef.current.get(product.sku) ?? 0
-    const projected = already + 1
 
-    // Warn-but-allow oversell, exactly like frmPos: cached stock can be
-    // minutes stale (baking/decorating recorded after the fact), so the
-    // counter must never hard-stop a sale over it.
-    if (projected > product.currentstock) {
-      const proceed = window.confirm(
-        `Stock shows only ${product.currentstock} of "${product.basename}" (cart already has ${already}).\n\n` +
-          'If this was baked/decorated today, it may not be recorded yet - the sale will be ' +
-          'flagged for the office.\n\nSell anyway?',
-      )
-      if (!proceed) return
-    }
+    // OVERSELL WARNING DISABLED for the Aug 2026 shakeout month (owner request
+    // 2026-07-22). Oversell stays warn-but-allow on the server (it records
+    // shortfall_qty and flags the office regardless), so this only suppressed
+    // the counter-staff confirm prompt. Re-enable on Sept 1 when real inventory
+    // accuracy work begins - uncomment the block below. See MEMORY:
+    // skc-golive-shakeout-plan.
+    // const already = cartQtyRef.current.get(product.sku) ?? 0
+    // const projected = already + 1
+    // if (projected > product.currentstock) {
+    //   const proceed = window.confirm(
+    //     `Stock shows only ${product.currentstock} of "${product.basename}" (cart already has ${already}).\n\n` +
+    //       'If this was baked/decorated today, it may not be recorded yet - the sale will be ' +
+    //       'flagged for the office.\n\nSell anyway?',
+    //   )
+    //   if (!proceed) return
+    // }
 
     adjustCartQtyRef(product.sku, 1)
     cart.addItem(product, 1)
@@ -257,15 +267,17 @@ export function SaleScreen({ catalog, onComplete }: Props) {
     adjustCartQtyRef(line.sku, q - priorQtyForThisLine)
     lineQtyRef.current.set(line.key, q)
 
-    const product = catalog.find((p) => p.sku === line.sku)
-    if (!product) return
-    const qtyForSku = cartQtyRef.current.get(line.sku) ?? q
-    if (qtyForSku > product.currentstock) {
-      window.alert(
-        `Stock shows only ${product.currentstock} of "${product.basename}", but the cart now has ${qtyForSku}.\n\n` +
-          'If this was baked/decorated today, it may not be recorded yet - the sale will be flagged for the office.',
-      )
-    }
+    // OVERSELL WARNING DISABLED for the Aug 2026 shakeout month (owner request
+    // 2026-07-22) - same as the tap-to-add path above. Re-enable on Sept 1.
+    // const product = catalog.find((p) => p.sku === line.sku)
+    // if (!product) return
+    // const qtyForSku = cartQtyRef.current.get(line.sku) ?? q
+    // if (qtyForSku > product.currentstock) {
+    //   window.alert(
+    //     `Stock shows only ${product.currentstock} of "${product.basename}", but the cart now has ${qtyForSku}.\n\n` +
+    //       'If this was baked/decorated today, it may not be recorded yet - the sale will be flagged for the office.',
+    //   )
+    // }
   }
 
   function applyDiscount() {
@@ -292,7 +304,7 @@ export function SaleScreen({ catalog, onComplete }: Props) {
   // sale actually went through, since this app deliberately never prints a
   // receipt (see MEMORY: pos-void-and-branch-history-scope). Cleared by the
   // next tap-to-add.
-  const [lastSale, setLastSale] = useState<{ total: number; change: number | null } | null>(null)
+  const [lastSale, setLastSale] = useState<{ total: number; change: number | null; method: string } | null>(null)
 
   const hasSellableLine = cart.lines.some((l) => l.sku != null)
   // Short payment = cash was entered AND it's less than the total. Block it so a
@@ -301,19 +313,24 @@ export function SaleScreen({ catalog, onComplete }: Props) {
   // per sale, and forcing it on every sale is a bigger change than asked for;
   // this only stops the affirmatively-short case.
   const shortPayment = cart.tenderedCentavos != null && cart.tenderedCentavos < cart.totalCentavos
-  const canComplete =
-    !!onComplete &&
-    !completing &&
-    cart.staffName.trim() !== '' &&
-    hasSellableLine &&
-    cart.totalCentavos >= 0 &&
-    !shortPayment
+  // Base gate shared by the Cash button and the cashless buttons: an operator, a
+  // sellable line, a non-negative total, not already recording. The Cash flow
+  // adds `!shortPayment` on top (a cashless tap always rings the exact total, so
+  // short payment can't apply to it).
+  const canSubmit =
+    !!onComplete && !completing && cart.staffName.trim() !== '' && hasSellableLine && cart.totalCentavos >= 0
+  const canComplete = canSubmit && !shortPayment
 
-  async function complete() {
-    if (!onComplete || !canComplete) return
-    if (!window.confirm(`Complete this sale for ${formatCentavos(cart.totalCentavos)}?`)) return
+  // One submit path for every method. `tendered` is the cash collected for the
+  // Cash flow (may be null - the counter often doesn't track tender), or the
+  // exact total for a cashless tap (change always 0). Keeps the "Complete this
+  // sale?" confirm the owner asked to preserve, naming the method for non-cash.
+  async function submit(method: string, tendered: number | null) {
+    if (!onComplete || !canSubmit) return
     const total = cart.totalCentavos
-    const change = cart.changeCentavos
+    const confirmLabel = method === 'Cash' ? 'this sale' : `this ${method} sale`
+    if (!window.confirm(`Complete ${confirmLabel} for ${formatCentavos(total)}?`)) return
+    const change = tendered != null ? tendered - total : null
     setCompleting(true)
     setError('')
     try {
@@ -321,17 +338,23 @@ export function SaleScreen({ catalog, onComplete }: Props) {
         staffName: cart.staffName.trim(),
         lines: cart.lines,
         totalCentavos: total,
-        tenderedCentavos: cart.tenderedCentavos,
+        tenderedCentavos: tendered,
         changeCentavos: change,
+        paymentMethod: method,
       })
       cart.reset()
-      setLastSale({ total, change })
+      setLastSale({ total, change, method })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not record the sale - try again.')
     } finally {
       setCompleting(false)
     }
   }
+
+  // Cash uses the entered tender (gated by canComplete so an affirmatively-short
+  // amount is blocked); a cashless tap forces the exact total.
+  const completeCash = () => submit('Cash', cart.tenderedCentavos)
+  const completeCashless = (method: string) => submit(method, cart.totalCentavos)
 
   return (
     <div className="pos-screen">
@@ -391,6 +414,7 @@ export function SaleScreen({ catalog, onComplete }: Props) {
             lastSale ? (
               <div className="pos-last-sale" role="status">
                 <p className="pos-last-sale-total">Sale complete — {formatCentavos(lastSale.total)}</p>
+                {lastSale.method !== 'Cash' && <p className="pos-last-sale-method">Paid via {lastSale.method}</p>}
                 {lastSale.change != null && lastSale.change >= 0 && (
                   <p className="pos-last-sale-change">Change: {formatCentavos(lastSale.change)}</p>
                 )}
@@ -513,12 +537,31 @@ export function SaleScreen({ catalog, onComplete }: Props) {
           <button
             type="button"
             className="pos-complete-btn"
-            onClick={complete}
+            onClick={completeCash}
             disabled={!canComplete}
             title={onComplete ? undefined : 'Coming in the next increment'}
           >
             {completing ? 'Recording…' : 'Complete sale'}
           </button>
+
+          {/* Cashless methods: each rings the exact total (no change) and records
+              the method, going through the same "Complete sale?" confirm. Gated
+              on canSubmit (not canComplete) - a short cash amount typed above
+              doesn't block a cashless tap, which overrides tender to the total. */}
+          <div className="pos-cashless-row">
+            {CASHLESS_METHODS.map((method) => (
+              <button
+                key={method}
+                type="button"
+                className="pos-cashless-btn"
+                onClick={() => completeCashless(method)}
+                disabled={!canSubmit}
+                title={onComplete ? undefined : 'Coming in the next increment'}
+              >
+                {method}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
     </div>
