@@ -92,7 +92,7 @@ bool IsOwnerIp(HttpContext http)
 // an entry would be dead config rather than a usable fallback.
 var branchIps = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase)
 {
-    ["Yoho"] = new HashSet<string> { "100.90.222.11", "100.81.76.53", OwnerLaptopIp }
+    ["Yoho"] = new HashSet<string> { "100.81.76.53", OwnerLaptopIp }
 };
 
 bool IsTrustedBranchIp(string branch, HttpContext http)
