@@ -8,8 +8,11 @@ This repo is the **central API + web app** — and, as of 2026-07-23, the sole f
 development. Two sibling repos complete the system:
 
 - **[Juan23/SKC](https://github.com/Juan23/SKC)** — WinForms desktop clients (office, branch, and
-  owner-admin apps). **Frozen 2026-07-23** — maintenance-only, no new features; all client-side
-  admin work now goes through this repo's `SKC Admin CLI` console app instead.
+  owner-admin apps) plus the `SKC Admin CLI` console tool. **Frozen 2026-07-23, archived
+  2026-07-24** — no new features; the installed exes keep running until the webapp rollout
+  replaces them. Owner admin happens in this repo's webapp (Owner pages); the CLI remains the
+  bulk Excel path (re-clone SKC to run it). WinForms-era workspace notes live in that repo's
+  `ARCHIVED-WORKSPACE-NOTES.md`.
 - **[Juan23/skc-web](https://github.com/Juan23/skc-web)** — the public website (simplykates.com)
 
 ## What it does
