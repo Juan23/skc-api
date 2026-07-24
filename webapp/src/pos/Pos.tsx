@@ -2,7 +2,7 @@
 // A sibling of /login, not nested under <Layout>/<AuthProvider>'s role
 // sections - no Stock/Deliveries/Production/Sales nav, matching the plan's
 // decision #2 ("POS is a POS, nothing else").
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import type { InventoryRow, PosStaffPublic } from '../api/types'
 import { commitSale } from './commitSale'
@@ -132,18 +132,31 @@ function PosInner() {
 
   const branchName = auth.identity?.branchName ?? null
 
-  // Cached-staff mirror of refreshCatalog, keyed on branchName because the
+  // Cached-staff mirror of refreshCatalog. It MUST stay a single stable callback
+  // (empty deps): the sync engine captures this as onStaffChanged, and an
+  // already-in-flight runSync (started at mount while branchName was still null)
+  // finishes its staff pull and calls the onStaffChanged it closed over. If that
+  // closure were the branchName-null version, its `else setStaff([])` would wipe
+  // a picker that had already loaded once the branch resolved - the exact bug
+  // that made the cashier picker revert to the free-text input after a reload.
+  // Reading the live branch off a ref keeps one stable function that always sees
+  // the current branch, so no stale closure can clobber the loaded list. The
   // cache read is branch-guarded (a till re-provisioned to another branch must
-  // not show the old branch's cashiers). Re-runs when the identity resolves
-  // null -> branch on mount, same reason as the syncEngine's branchName dep.
+  // not show the old branch's cashiers).
+  const branchRef = useRef(branchName)
+  branchRef.current = branchName
   const refreshStaff = useCallback(() => {
-    if (branchName) void getCachedStaff(branchName).then(setStaff)
+    const b = branchRef.current
+    if (b) void getCachedStaff(b).then(setStaff)
     else setStaff([])
-  }, [branchName])
+  }, [])
 
+  // branchName in the deps (not refreshStaff's) so this re-reads the cache when
+  // the identity resolves null -> branch on mount, same reason as syncEngine's
+  // branchName dep - while refreshStaff itself stays referentially stable.
   useEffect(() => {
     refreshStaff()
-  }, [refreshStaff])
+  }, [refreshStaff, branchName])
 
   const sync = usePosSync({ branchName, onCatalogChanged: refreshCatalog, onStaffChanged: refreshStaff })
 
