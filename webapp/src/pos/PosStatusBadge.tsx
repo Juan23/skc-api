@@ -1,10 +1,12 @@
 // Status indicator for the web POS (webapp-pos-plan.md Increment 5): OFFLINE /
-// SYNCING / SYNCED / SYNC ERROR / SIGN-IN-TO-SYNC. The live sync truth
-// (syncing / sync-error / offline) is shown FIRST when it applies, so a real
-// network outage or storage failure is never masked as "sign in" - a signed-out
-// but offline till reads OFFLINE, not SIGN-IN TO SYNC (you can't sign in with no
-// network anyway). The signin-required hint shows only once the sync path is
-// otherwise healthy, where "sign in when convenient" is the actionable thing.
+// SYNCING / SYNCED / SYNC ERROR. The live sync truth (syncing / sync-error /
+// offline) is shown first when it applies. authMode 'signin-required' (an
+// expired 12h session with the server reachable) deliberately has NO badge
+// state of its own since 2026-07-24: sales sync cookie-less through the
+// device/IP gates, so an expired session changes nothing operationally and
+// the sync status is the honest signal. (The old SIGN-IN TO SYNC chip - and
+// the sign-in overlay it pointed at - nagged for the branch password every
+// morning on tills that shut down nightly.)
 import type { PosAuthMode } from './posAuth'
 import type { PosSyncStatus } from './syncEngine'
 
@@ -26,9 +28,6 @@ export function PosStatusBadge({ authMode, syncStatus, pendingCount }: Props) {
     tone = 'error'
   } else if (syncStatus === 'offline' || authMode === 'offline') {
     label = 'OFFLINE'
-    tone = 'warn'
-  } else if (authMode === 'signin-required') {
-    label = 'SIGN-IN TO SYNC'
     tone = 'warn'
   } else if (syncStatus === 'synced') {
     label = 'SYNCED'

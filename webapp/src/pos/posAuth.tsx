@@ -3,6 +3,15 @@
 // fatal for a till that must keep selling through both of those. This is a
 // separate, POS-only provider that never redirects: it degrades through
 // online / offline / signin-required instead.
+//
+// Since 2026-07-24, 'signin-required' surfaces NO UI at all (no overlay, no
+// badge chip): tills shut down nightly, so the 12h session expired every
+// morning and the old overlay asked cashiers for the branch password daily - a
+// credential only the owner holds (cashiers have PINs). Operationally an
+// expired session changes nothing: sales sync cookie-less via the device/IP
+// gates and catalog/staff pulls are ungated GETs. The branch credential's only
+// POS job is the one-time till enrollment (ProvisionScreen); the mode is kept
+// internally to distinguish "server reachable, session dead" from 'offline'.
 import { createContext, useContext, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { api, ApiError } from '../api/client'
@@ -232,11 +241,12 @@ export function PosAuthProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  // A deliberate, explicit credential entry (provisioning a new till, or the
-  // mid-shift signin-required overlay). Unlike the passive mount check, this
-  // validates the account before committing it: a non-Branch account, or a
-  // Branch account for the *wrong* branch, must fail loudly rather than
-  // silently no-op (blank provision form) or hijack the till's identity.
+  // A deliberate, explicit credential entry (till enrollment via the
+  // ProvisionScreen - its only caller since the signin overlay was removed).
+  // Unlike the passive mount check, this validates the account before
+  // committing it: a non-Branch account, or a Branch account for the *wrong*
+  // branch, must fail loudly rather than silently no-op (blank provision form)
+  // or hijack the till's identity.
   async function login(username: string, password: string) {
     setLoginError('')
     setLoggingIn(true)

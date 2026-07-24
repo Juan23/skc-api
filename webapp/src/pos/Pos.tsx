@@ -107,23 +107,15 @@ function ProvisionScreen() {
   )
 }
 
-function SignInOverlay() {
-  const auth = usePosAuth()
-  async function submit(username: string, password: string) {
-    try {
-      await auth.login(username, password)
-    } catch {
-      /* error already surfaced via auth.loginError */
-    }
-  }
-  return (
-    <div className="pos-signin-overlay">
-      <p>Session expired. Sales keep queuing and syncing - sign in when convenient.</p>
-      <SignInForm onSubmit={submit} busy={auth.loggingIn} error={auth.loginError} submitLabel="Sign in" />
-    </div>
-  )
-}
-
+// NOTE (2026-07-24): there used to be a SignInOverlay here, shown whenever the
+// 12h branch session expired ('signin-required'). Removed at the owner's
+// direction: tills are shut down nightly, so the expired-session card appeared
+// EVERY morning asking cashiers for the branch password - a credential only
+// the owner should hold (cashiers have their own PINs). The session isn't
+// needed for operation anyway: sales sync cookie-less through the device/IP
+// gates, and catalog/staff pulls are ungated GETs. The branch credential's
+// only POS job is the one-time enrollment (ProvisionScreen above); everything
+// else it guards lives in the /branch webapp screens, which keep their login.
 function PosInner() {
   const auth = usePosAuth()
   const [catalog, setCatalog] = useState<InventoryRow[]>([])
@@ -172,7 +164,6 @@ function PosInner() {
     <div className="pos-page">
       <PosNav view={view} onChange={setView} />
       <PosStatusBadge authMode={auth.mode} syncStatus={sync.status} pendingCount={sync.pendingCount} />
-      {auth.mode === 'signin-required' && <SignInOverlay />}
       {/* Both views stay mounted; only 'sell' is display:none'd when hidden so a
           part-built cart isn't lost by switching to the day log and back. The
           day log remounts each time it's shown (keyed by view) to re-pull. */}

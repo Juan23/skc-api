@@ -577,34 +577,6 @@
   color: var(--muted);
 }
 
-/* Anchored bottom-LEFT, over the scrollable catalog grid - deliberately NOT
-   bottom-right, where the 400px cart rail's checkout (cash inputs, quick-cash
-   chips, Complete-sale button) lives. This overlay is non-blocking ("sign in
-   when convenient") precisely so a cashier keeps ringing sales while it shows,
-   so it must not cover the controls that do the ringing. */
-.pos-signin-overlay {
-  position: fixed;
-  bottom: 16px;
-  left: 16px;
-  z-index: 20;
-  width: 280px;
-  padding: 14px;
-  background: var(--surface);
-  border: 1px solid var(--silver);
-  border-radius: 12px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
-}
-
-.pos-signin-overlay p {
-  margin: 0 0 8px;
-  font-size: 13px;
-  color: var(--muted);
-}
-
-.pos-signin-overlay input {
-  height: 32px;
-}
-
 .pos-provision {
   display: flex;
   align-items: center;
@@ -942,11 +914,10 @@
   flex: 1;
 }
 
-/* SignInForm renders bare <input>s (aria-label, no <label> wrapper) since it's
-   reused inside the compact overlay - give its <form> the same vertical stack
-   the rest of the app gets from `.card label`'s flex-column. */
-.pos-provision form,
-.pos-signin-overlay form {
+/* SignInForm renders bare <input>s (aria-label, no <label> wrapper) - give its
+   <form> the same vertical stack the rest of the app gets from `.card label`'s
+   flex-column. */
+.pos-provision form {
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -1181,11 +1152,10 @@
 /* --- print: only the report document, nothing else ----------------------- */
 @media print {
   /* Hide the app chrome and the report's own controls - print only the doc.
-     .pos-status and .pos-signin-overlay are position:fixed, so if left visible
-     the browser repeats them on every printed page over the report header. */
+     .pos-status is position:fixed, so if left visible the browser repeats it
+     on every printed page over the report header. */
   .pos-nav,
   .pos-status,
-  .pos-signin-overlay,
   .pos-report-controls,
   .pos-report-msg,
   .pos-signout-link {
