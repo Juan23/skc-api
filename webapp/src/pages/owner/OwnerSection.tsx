@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from 'react-router-dom'
 import { SectionNav } from '../../components/SectionNav'
 import { Users } from './Users'
 import { Devices } from './Devices'
+import { Staff } from './Staff'
 import { Recipes } from './Recipes'
 import { Classify } from './Classify'
 
@@ -11,6 +12,7 @@ import { Classify } from './Classify'
 const ITEMS = [
   { to: '/owner', label: 'Users' },
   { to: '/owner/devices', label: 'Devices' },
+  { to: '/owner/staff', label: 'Staff' },
   { to: '/owner/recipes', label: 'Recipes' },
   { to: '/owner/products', label: 'Products & pricing' },
 ]
@@ -22,6 +24,7 @@ export function OwnerSection() {
       <Routes>
         <Route index element={<Users />} />
         <Route path="devices" element={<Devices />} />
+        <Route path="staff" element={<Staff />} />
         <Route path="recipes" element={<Recipes />} />
         <Route path="products" element={<Classify />} />
         <Route path="*" element={<Navigate to="/owner" replace />} />

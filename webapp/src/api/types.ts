@@ -52,6 +52,27 @@ export interface AppDevice {
   createdAt: string
 }
 
+// A POS cashier, managed by the owner from /owner/staff. Admin list shape -
+// no PIN material.
+export interface PosStaff {
+  staffId: number
+  branchName: string
+  staffName: string
+  isActive: boolean
+  // Text, never a JS Date - same reason as AppUser.createdAt above.
+  createdAt: string
+}
+
+// The tills' per-branch feed (GET /api/staff/branch/{branch}): active cashiers
+// WITH their PIN salt+hash, cached in IndexedDB so the picker can verify PINs
+// offline. Accountability-grade by design - see staffSync.ts.
+export interface PosStaffPublic {
+  staffId: number
+  staffName: string
+  pinSalt: string
+  pinHash: string
+}
+
 // --- inventory (DYNAMIC Dapper overload - lowercase keys, see header note) ---
 
 export interface InventoryRow {
