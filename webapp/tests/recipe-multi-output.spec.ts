@@ -58,7 +58,14 @@ test('create a multi-output recipe through the owner UI', async ({ page }) => {
   await page.getByLabel('Ingredient').first().selectOption('zz-flour')
   await page.getByLabel('Qty per batch').first().fill('500')
 
-  await page.screenshot({ path: 'test-results/recipe-multi-output-editor.png', fullPage: true })
+  // Element screenshot of the editor, NOT a fullPage page.screenshot. This is
+  // load-bearing: a fullPage capture internally resizes the viewport to the
+  // page's full height, and once this page grew long enough (every pass leaves
+  // a zz recipe row - duplicates allowed, see bug-track.md) the click AFTER it
+  // silently missed - no POST, no error, form intact. Reproduced deterministically
+  // 2026-07-24; scrollIntoViewIfNeeded did not fix it. The list screenshot at
+  // the end of the test is safe to keep fullPage - no click follows it.
+  await page.locator('.editor').screenshot({ path: 'test-results/recipe-multi-output-editor.png' })
 
   // --- save ---
   const saveResp = page.waitForResponse((r) => r.url().includes('/api/recipes') && r.request().method() === 'POST')

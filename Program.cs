@@ -356,7 +356,11 @@ app.MapPost("/api/auth/login", async (LoginDto dto, HttpContext http) =>
     var attempts = loginAttempts.AddOrUpdate(ip,
         _ => (now, 1),
         (_, cur) => now - cur.WindowStart > TimeSpan.FromMinutes(5) ? (now, 1) : (cur.WindowStart, cur.Count + 1));
-    if (attempts.Count > 10) return Results.StatusCode(429);
+    // 50, not 10 (bumped 2026-07-24): a full Playwright suite run costs ~9 logins
+    // from one IP, so 10 made back-to-back runs 429 - pure friction, since the
+    // only callers are already inside the tailnet AND device-gated. 50/5min still
+    // caps credential guessing at a rate that goes nowhere against real passwords.
+    if (attempts.Count > 50) return Results.StatusCode(429);
 
     using var db = new NpgsqlConnection(connectionString);
     await db.OpenAsync();
