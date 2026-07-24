@@ -220,22 +220,6 @@
   color: var(--firebrick);
 }
 
-.pos-pinpad {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 6px;
-}
-
-.pos-pinpad-key {
-  min-height: 48px;
-  background: var(--surface);
-  border: 1px solid var(--silver);
-  border-radius: 10px;
-  cursor: pointer;
-  font-size: 18px;
-  font-weight: 600;
-}
-
 .pos-cart-lines {
   flex: 1;
   min-height: 80px;

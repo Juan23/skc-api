@@ -7,8 +7,9 @@ import { verifyPin } from './staffSync'
 // component never touches IndexedDB or the network). Three states:
 //   verified  - `current` names a cashier; show it + a Switch button.
 //   pick      - no current cashier; one button per cached active cashier.
-//   pin       - a name was tapped; numeric PIN entry (keyboard + on-screen pad),
-//               auto-verifies at 4 digits via the offline hash check.
+//   pin       - a name was tapped; numeric PIN entry typed on the keyboard
+//               (every till PC has one), auto-verifies at 4 digits via the
+//               offline hash check.
 //
 // Deliberately NO lockout on wrong PINs: verification is client-side on a
 // possibly-offline till, so any lockout is a bricked counter mid-shift. Wrong
@@ -117,23 +118,6 @@ export function CashierPicker({ staff, current, onVerified, onSwitch }: Props) {
             {error}
           </p>
         )}
-        <div className="pos-pinpad">
-          {['1', '2', '3', '4', '5', '6', '7', '8', '9', '⌫', '0', 'C'].map((k) => (
-            <button
-              key={k}
-              type="button"
-              className="pos-pinpad-key"
-              aria-label={k === '⌫' ? 'Backspace' : k === 'C' ? 'Clear' : k}
-              onClick={() => {
-                if (k === '⌫') void handlePinChange(pin.slice(0, -1))
-                else if (k === 'C') void handlePinChange('')
-                else void handlePinChange(pin + k)
-              }}
-            >
-              {k}
-            </button>
-          ))}
-        </div>
       </div>
     )
   }
