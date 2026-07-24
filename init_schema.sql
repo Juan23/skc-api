@@ -309,3 +309,30 @@ INSERT INTO app_devices (tailscale_ip, tier, branch_name, label) VALUES
     ('100.66.61.24',   'Office', NULL,   'SKC Bakery Supplies office PC'),
     ('100.81.76.53',   'Branch', 'Yoho', 'Yoho store PC')
 ON CONFLICT (tailscale_ip) DO NOTHING;
+
+-- ====================================================================
+-- 10. POS cashier registry (mirrors migrations/012_pos_staff.sql)
+-- ====================================================================
+-- Owner-managed per-branch staff list backing the web POS cashier picker.
+-- PIN salt+hash are served to tills and cached in IndexedDB for offline
+-- verification - accountability-grade attribution, not access control.
+CREATE TABLE IF NOT EXISTS pos_staff (
+    staff_id    SERIAL PRIMARY KEY,
+    branch_name VARCHAR(100) NOT NULL,   -- plain string, exact-match like everywhere (no branches table)
+    staff_name  VARCHAR(100) NOT NULL,   -- the exact string written to pos_sales.staff_name
+    pin_salt    TEXT NOT NULL,           -- 16 random bytes, lowercase hex
+    pin_hash    TEXT NOT NULL,           -- lowercase hex SHA-256(UTF8(pin_salt || pin))
+    is_active   BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at  TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Case-insensitive per-branch uniqueness ('Ana'/'ana' would be
+-- indistinguishable on the picker and in reports); still raises 23505.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_pos_staff_branch_name
+    ON pos_staff (branch_name, LOWER(staff_name));
+
+CREATE INDEX IF NOT EXISTS idx_pos_staff_branch_active
+    ON pos_staff (branch_name, is_active);
+
+-- No seed rows: an empty branch = that branch's tills use the free-text
+-- staff-name fallback until the owner adds its cashiers.
