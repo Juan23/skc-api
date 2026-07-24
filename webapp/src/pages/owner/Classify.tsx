@@ -14,6 +14,17 @@ const CATEGORIES: InventoryRow['category'][] = [
   'Miscellaneous',
 ]
 
+// Category quick-filter for the list. 'All' is the default; the rest mirror
+// CATEGORIES so every category is filterable, with readable labels.
+type CategoryFilter = InventoryRow['category'] | 'All'
+const CATEGORY_FILTERS: { value: CategoryFilter; label: string }[] = [
+  { value: 'All', label: 'All' },
+  { value: 'RawMaterial', label: 'Raw material' },
+  { value: 'BakedGood', label: 'Baked good' },
+  { value: 'DecoratedGood', label: 'Decorated good' },
+  { value: 'Miscellaneous', label: 'Misc' },
+]
+
 interface AddDraft {
   sku: string
   brand: string
@@ -52,6 +63,7 @@ const emptyAddDraft = (): AddDraft => ({
 export function Classify() {
   const { data, loading, error, reload } = useApi<InventoryRow[]>('/api/inventory')
   const [search, setSearch] = useState('')
+  const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>('All')
   const [editing, setEditing] = useState<string | null>(null)
   const [draft, setDraft] = useState<InventoryRow | null>(null)
   const [adding, setAdding] = useState(false)
@@ -69,12 +81,13 @@ export function Classify() {
   const rows = useMemo(() => {
     if (!data) return null
     const term = search.trim().toLowerCase()
-    if (!term) return data
-    // Brand + item name only, not SKU (site-wide search rule).
-    return data.filter(
-      (r) => r.basename.toLowerCase().includes(term) || (r.brand ?? '').toLowerCase().includes(term),
-    )
-  }, [data, search])
+    return data.filter((r) => {
+      if (categoryFilter !== 'All' && r.category !== categoryFilter) return false
+      if (!term) return true
+      // Brand + item name only, not SKU (site-wide search rule).
+      return r.basename.toLowerCase().includes(term) || (r.brand ?? '').toLowerCase().includes(term)
+    })
+  }, [data, search, categoryFilter])
 
   function startEdit(row: InventoryRow) {
     setAdding(false)
@@ -432,6 +445,18 @@ export function Classify() {
           </div>
         </div>
       )}
+
+      <div className="toolbar" style={{ flexWrap: 'wrap' }}>
+        {CATEGORY_FILTERS.map((f) => (
+          <button
+            key={f.value}
+            className={`btn ${categoryFilter === f.value ? 'primary' : 'neutral'}`}
+            onClick={() => setCategoryFilter(f.value)}
+          >
+            {f.label}
+          </button>
+        ))}
+      </div>
 
       <div className="toolbar">
         <label className="inline">
