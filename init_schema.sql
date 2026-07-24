@@ -278,3 +278,34 @@ CREATE INDEX IF NOT EXISTS idx_app_sessions_expires ON app_sessions(expires_at);
 INSERT INTO app_users (username, password_hash, role)
 VALUES ('owner', '!', 'Owner')
 ON CONFLICT (username) DO NOTHING;
+
+-- ====================================================================
+-- 9. Device -> tier registry (mirrors migrations/011_app_devices.sql)
+-- ====================================================================
+-- One row per trusted Tailscale device. The three IP gates read an in-process
+-- snapshot of the active rows; a tier hierarchy (Owner satisfies Office and any
+-- branch) reproduces the old overlapping literal allowlists without duplicate rows.
+CREATE TABLE IF NOT EXISTS app_devices (
+    device_id    SERIAL PRIMARY KEY,
+    tailscale_ip VARCHAR(45) NOT NULL UNIQUE,       -- canonical IPv4 dotted-quad (MapToIPv4)
+    tier         VARCHAR(20) NOT NULL,              -- Owner | Office | Branch
+    branch_name  VARCHAR(100),                      -- required for Branch, meaningless otherwise
+    label        VARCHAR(200),                      -- human note ("Owner laptop")
+    is_active    BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at   TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT chk_app_devices_tier   CHECK (tier IN ('Owner', 'Office', 'Branch')),
+    CONSTRAINT chk_app_devices_branch CHECK (tier <> 'Branch' OR branch_name IS NOT NULL)
+);
+
+CREATE INDEX IF NOT EXISTS idx_app_devices_active ON app_devices(is_active);
+
+-- Seed = the original hardcoded device allowlists, one row per device at its
+-- highest tier. ON CONFLICT so a re-run never clobbers owner-edited rows.
+INSERT INTO app_devices (tailscale_ip, tier, branch_name, label) VALUES
+    ('100.108.218.24', 'Owner',  NULL,   'Owner laptop'),
+    ('100.81.94.66',   'Owner',  NULL,   'Owner phone'),
+    ('100.69.186.113', 'Owner',  NULL,   'Home server (threelittlebears)'),
+    ('100.66.61.24',   'Office', NULL,   'SKC Bakery Supplies office PC'),
+    ('100.81.76.53',   'Branch', 'Yoho', 'Yoho store PC')
+ON CONFLICT (tailscale_ip) DO NOTHING;

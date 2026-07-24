@@ -44,68 +44,60 @@ var app = builder.Build();
 // Must run before every other middleware/endpoint - see the KnownProxies comment above.
 app.UseForwardedHeaders();
 
-// Office/owner IP allowlist. Tailscale assigns each device on the tailnet a stable 100.x
+// Office/owner/branch IP allowlists. Tailscale assigns each device on the tailnet a stable 100.x
 // address, so checking the caller's remote IP is a real server-side restriction rather than
-// trusting whoever has a copy of the client exe. Only two entries exist today - there's no
-// branches table or auth system yet, so per-branch entries get added here once each branch
-// PC joins Tailscale (branch-initiated endpoints like /accept aren't gated yet for that reason).
-var trustedOfficeIps = new HashSet<string>
+// trusting whoever has a copy of the client exe. These used to be hardcoded HashSet/Dictionary
+// literals here; since migration 011 they live in the app_devices table, which the owner edits
+// from the webapp (POST/PUT/PATCH/DELETE /api/devices) instead of a code change + redeploy.
+// deviceRegistry (defined near the file bottom) caches an in-process snapshot of the active rows
+// so these gates - which run on every request - don't hit Postgres each time; a write endpoint
+// calls deviceRegistry.Invalidate() so an edit takes effect on the very next request.
+//
+// The snapshot applies a tier hierarchy that reproduces the old overlapping sets exactly:
+//   Owner-tier device  -> satisfies owner + office + every branch check
+//   Office-tier device -> satisfies office
+//   Branch-tier device -> satisfies only its own branch
+// A branch with no Branch-tier row is absent from the snapshot's branch map, so IsTrustedBranchIp
+// FAILS OPEN for it (unchanged) - most branches aren't on Tailscale yet and would otherwise break.
+var deviceRegistry = new DeviceRegistry(connectionString!);
+
+// Break-glass: the owner's own physical devices are ALSO trusted for owner checks in code, so an
+// empty/typo'd/all-deactivated app_devices table (or a DB blip that yields an empty snapshot) can
+// never lock the owner out of /api/devices or /api/users - they can always sign in from a known
+// device and repair the registry. Scoped to owner only (correct blast radius). Update this list by
+// hand if the owner's personal devices ever change. (These are the same three IPs migration 011 seeds.)
+var emergencyOwnerIps = new HashSet<string> { "100.108.218.24", "100.81.94.66", "100.69.186.113" };
+
+// ForwardedHeaders already rewrote RemoteIpAddress to the real tailnet caller (see top of file).
+string? NormalizedIp(HttpContext http)
 {
-    "100.66.61.24",   // SKC Bakery Supplies office PC
-    "100.108.218.24", // Owner's laptop
-    "100.81.94.66"    // Owner's phone
-};
+    var ip = http.Connection.RemoteIpAddress;
+    if (ip == null) return null;
+    if (ip.IsIPv4MappedToIPv6) ip = ip.MapToIPv4();
+    return ip.ToString();
+}
 
 bool IsTrustedOfficeIp(HttpContext http)
 {
-    var ip = http.Connection.RemoteIpAddress;
+    var ip = NormalizedIp(http);
     if (ip == null) return false;
-    if (ip.IsIPv4MappedToIPv6) ip = ip.MapToIPv4();
-    return trustedOfficeIps.Contains(ip.ToString());
+    return deviceRegistry.Current().OfficeIps.Contains(ip);
 }
-
-// Recipes are the owner's alone (branches never see recipe management, only the
-// finished recipe list read-only for production entry) - stricter than the
-// general office allowlist above, which also includes the office PC.
-// Both of the owner's personal devices qualify; the laptop is named separately
-// below because it (not the phone) is the one that stands in as a branch device.
-const string OwnerLaptopIp = "100.108.218.24";
-const string OwnerPhoneIp = "100.81.94.66";
-// Owner's home server (`threelittlebears`) - the dev/ops box changes are built and
-// verified from, added 2026-07-23 so owner-gated screens (recipes, prices) can be
-// driven from it too.
-const string OwnerHomeServerIp = "100.69.186.113";
-
-var ownerIps = new HashSet<string> { OwnerLaptopIp, OwnerPhoneIp, OwnerHomeServerIp };
 
 bool IsOwnerIp(HttpContext http)
 {
-    var ip = http.Connection.RemoteIpAddress;
+    var ip = NormalizedIp(http);
     if (ip == null) return false;
-    if (ip.IsIPv4MappedToIPv6) ip = ip.MapToIPv4();
-    return ownerIps.Contains(ip.ToString());
+    return deviceRegistry.Current().OwnerIps.Contains(ip) || emergencyOwnerIps.Contains(ip);
 }
-
-// Per-branch IP allowlist, filled in incrementally as each branch's PCs join Tailscale (see the
-// trustedOfficeIps comment above - this is that promised parallel map). A branch with no entry
-// here is treated as not yet onboarded and stays ungated on its own writes (validation is its
-// only protection, same as before), since it may still be running Aronium instead of this system.
-// The owner's laptop is kept in every onboarded branch's set too, so it keeps working as a
-// fallback/testing device for that branch without a separate code change. The owner's phone is
-// deliberately NOT here: branch writes come from the WinForms POS, which a phone can't run, so
-// an entry would be dead config rather than a usable fallback.
-var branchIps = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase)
-{
-    ["Yoho"] = new HashSet<string> { "100.81.76.53", OwnerLaptopIp }
-};
 
 bool IsTrustedBranchIp(string branch, HttpContext http)
 {
-    if (!branchIps.TryGetValue(branch, out var allowed)) return true;
-    var ip = http.Connection.RemoteIpAddress;
+    var snapshot = deviceRegistry.Current();
+    if (!snapshot.BranchIps.TryGetValue(branch, out var allowed)) return true;   // FAIL-OPEN, unchanged
+    var ip = NormalizedIp(http);
     if (ip == null) return false;
-    if (ip.IsIPv4MappedToIPv6) ip = ip.MapToIPv4();
-    return allowed.Contains(ip.ToString());
+    return allowed.Contains(ip);
 }
 
 // ---------------------------------------------------------------------------
@@ -591,6 +583,160 @@ app.MapPatch("/api/users/{id:int}/activate", async (int id, HttpContext http) =>
     using var db = new NpgsqlConnection(connectionString);
     int rows = await db.ExecuteAsync("UPDATE app_users SET is_active = TRUE WHERE user_id = @id", new { id });
     return rows == 0 ? Results.NotFound($"No user {id}.") : Results.Ok(new { Status = "Activated" });
+});
+
+// ---------------------------------------------------------------------------
+// Device -> tier registry management (migration 011). Same owner-only trust as
+// user management: RequireOwnerAdmin (Owner role AND owner IP, no cookie-less
+// fallback). Every write calls deviceRegistry.Invalidate() so the change applies
+// on the very next request rather than after the 30s cache TTL.
+// ---------------------------------------------------------------------------
+string? ValidateDeviceDto(string? tailscaleIp, string tier, string? branchName, out string normalizedIp)
+{
+    normalizedIp = "";
+    if (string.IsNullOrWhiteSpace(tailscaleIp) || !IPAddress.TryParse(tailscaleIp.Trim(), out var parsed))
+        return "A valid IP address is required.";
+    if (parsed.IsIPv4MappedToIPv6) parsed = parsed.MapToIPv4();
+    normalizedIp = parsed.ToString();   // store canonical form so it matches the normalized RemoteIpAddress
+    if (tier != "Owner" && tier != "Office" && tier != "Branch")
+        return "Tier must be Owner, Office or Branch.";
+    if (tier == "Branch" && string.IsNullOrWhiteSpace(branchName))
+        return "A Branch device must be tied to a branch.";
+    return null;
+}
+
+// The hardcoded emergencyOwnerIps mean the owner is never truly locked out, but
+// this guard stops the owner accidentally emptying the owner tier and stranding a
+// non-emergency owner device - mirrors WouldOrphanOwnersAsync for user management.
+async Task<bool> WouldOrphanOwnerDevicesAsync(NpgsqlConnection db, int excludedDeviceId)
+{
+    int others = await db.ExecuteScalarAsync<int>(
+        "SELECT COUNT(*) FROM app_devices WHERE tier = 'Owner' AND is_active AND device_id <> @DeviceId",
+        new { DeviceId = excludedDeviceId });
+    return others == 0;
+}
+
+app.MapGet("/api/devices", async (HttpContext http) =>
+{
+    var denied = RequireOwnerAdmin(http); if (denied != null) return denied;
+    using var db = new NpgsqlConnection(connectionString);
+    return Results.Ok(await db.QueryAsync<AppDeviceRow>(@"
+        SELECT device_id AS DeviceId, tailscale_ip AS TailscaleIp, tier AS Tier, branch_name AS BranchName,
+               label AS Label, is_active AS IsActive, created_at AS CreatedAt
+        FROM app_devices ORDER BY tier, branch_name NULLS FIRST, tailscale_ip"));
+});
+
+app.MapPost("/api/devices", async (CreateDeviceDto dto, HttpContext http) =>
+{
+    var denied = RequireOwnerAdmin(http); if (denied != null) return denied;
+    var invalid = ValidateDeviceDto(dto.TailscaleIp, dto.Tier, dto.BranchName, out var ip);
+    if (invalid != null) return Results.BadRequest(invalid);
+
+    using var db = new NpgsqlConnection(connectionString);
+    try
+    {
+        int id = await db.ExecuteScalarAsync<int>(@"
+            INSERT INTO app_devices (tailscale_ip, tier, branch_name, label)
+            VALUES (@Ip, @Tier, @BranchName, @Label)
+            RETURNING device_id",
+            new
+            {
+                Ip = ip,
+                dto.Tier,
+                BranchName = dto.Tier == "Branch" ? dto.BranchName!.Trim() : null,
+                Label = string.IsNullOrWhiteSpace(dto.Label) ? null : dto.Label!.Trim()
+            });
+        deviceRegistry.Invalidate();
+        return Results.Ok(new { DeviceId = id });
+    }
+    catch (PostgresException ex) when (ex.SqlState == "23505")
+    {
+        return Results.Problem($"A device with IP '{ip}' already exists.", statusCode: 409);
+    }
+});
+
+app.MapPut("/api/devices/{id:int}", async (int id, UpdateDeviceDto dto, HttpContext http) =>
+{
+    var denied = RequireOwnerAdmin(http); if (denied != null) return denied;
+    var invalid = ValidateDeviceDto(dto.TailscaleIp, dto.Tier, dto.BranchName, out var ip);
+    if (invalid != null) return Results.BadRequest(invalid);
+
+    using var db = new NpgsqlConnection(connectionString);
+    await db.OpenAsync();
+
+    var current = await db.QuerySingleOrDefaultAsync<AppDeviceRow>(
+        @"SELECT device_id AS DeviceId, tailscale_ip AS TailscaleIp, tier AS Tier, branch_name AS BranchName,
+                 label AS Label, is_active AS IsActive, created_at AS CreatedAt
+          FROM app_devices WHERE device_id = @id", new { id });
+    if (current == null) return Results.NotFound($"No device {id}.");
+    if (current.Tier == "Owner" && dto.Tier != "Owner" && current.IsActive && await WouldOrphanOwnerDevicesAsync(db, id))
+        return Results.BadRequest("This is the last active owner device - changing its tier could lock the owner out of device management.");
+
+    try
+    {
+        await db.ExecuteAsync(@"
+            UPDATE app_devices SET tailscale_ip = @Ip, tier = @Tier, branch_name = @BranchName, label = @Label
+            WHERE device_id = @id",
+            new
+            {
+                Ip = ip,
+                dto.Tier,
+                BranchName = dto.Tier == "Branch" ? dto.BranchName!.Trim() : null,
+                Label = string.IsNullOrWhiteSpace(dto.Label) ? null : dto.Label!.Trim(),
+                id
+            });
+        deviceRegistry.Invalidate();
+        return Results.Ok(new { Status = "Updated" });
+    }
+    catch (PostgresException ex) when (ex.SqlState == "23505")
+    {
+        return Results.Problem($"A device with IP '{ip}' already exists.", statusCode: 409);
+    }
+});
+
+app.MapPatch("/api/devices/{id:int}/deactivate", async (int id, HttpContext http) =>
+{
+    var denied = RequireOwnerAdmin(http); if (denied != null) return denied;
+    using var db = new NpgsqlConnection(connectionString);
+    await db.OpenAsync();
+
+    var tier = await db.ExecuteScalarAsync<string?>("SELECT tier FROM app_devices WHERE device_id = @id", new { id });
+    if (tier == null) return Results.NotFound($"No device {id}.");
+    if (tier == "Owner" && await WouldOrphanOwnerDevicesAsync(db, id))
+        return Results.BadRequest("This is the last active owner device - deactivating it could lock the owner out of device management.");
+
+    await db.ExecuteAsync("UPDATE app_devices SET is_active = FALSE WHERE device_id = @id", new { id });
+    deviceRegistry.Invalidate();
+    return Results.Ok(new { Status = "Deactivated" });
+});
+
+app.MapPatch("/api/devices/{id:int}/activate", async (int id, HttpContext http) =>
+{
+    var denied = RequireOwnerAdmin(http); if (denied != null) return denied;
+    using var db = new NpgsqlConnection(connectionString);
+    int rows = await db.ExecuteAsync("UPDATE app_devices SET is_active = TRUE WHERE device_id = @id", new { id });
+    if (rows == 0) return Results.NotFound($"No device {id}.");
+    deviceRegistry.Invalidate();
+    return Results.Ok(new { Status = "Activated" });
+});
+
+app.MapDelete("/api/devices/{id:int}", async (int id, HttpContext http) =>
+{
+    var denied = RequireOwnerAdmin(http); if (denied != null) return denied;
+    using var db = new NpgsqlConnection(connectionString);
+    await db.OpenAsync();
+
+    var device = await db.QuerySingleOrDefaultAsync<AppDeviceRow>(
+        @"SELECT device_id AS DeviceId, tailscale_ip AS TailscaleIp, tier AS Tier, branch_name AS BranchName,
+                 label AS Label, is_active AS IsActive, created_at AS CreatedAt
+          FROM app_devices WHERE device_id = @id", new { id });
+    if (device == null) return Results.NotFound($"No device {id}.");
+    if (device.Tier == "Owner" && device.IsActive && await WouldOrphanOwnerDevicesAsync(db, id))
+        return Results.BadRequest("This is the last active owner device - deleting it could lock the owner out of device management.");
+
+    await db.ExecuteAsync("DELETE FROM app_devices WHERE device_id = @id", new { id });
+    deviceRegistry.Invalidate();
+    return Results.Ok(new { Status = "Deleted" });
 });
 
 app.MapPost("/api/purchases", async (List<PurchaseLogDto> purchases, HttpContext http) =>
@@ -1941,6 +2087,121 @@ public class UpdateUserDto
 public class ResetPasswordDto
 {
     public string? NewPassword { get; set; }
+}
+
+// --- device -> tier registry (migration 011) -------------------------------
+
+public class AppDeviceRow
+{
+    public int DeviceId { get; set; }
+    public string TailscaleIp { get; set; } = string.Empty;
+    public string Tier { get; set; } = string.Empty;   // Owner | Office | Branch
+    public string? BranchName { get; set; }
+    public string? Label { get; set; }
+    public bool IsActive { get; set; }
+    public DateTime CreatedAt { get; set; }
+}
+
+public class CreateDeviceDto
+{
+    public string? TailscaleIp { get; set; }
+    public string Tier { get; set; } = string.Empty;
+    public string? BranchName { get; set; }
+    public string? Label { get; set; }
+}
+
+public class UpdateDeviceDto
+{
+    public string? TailscaleIp { get; set; }
+    public string Tier { get; set; } = string.Empty;
+    public string? BranchName { get; set; }
+    public string? Label { get; set; }
+}
+
+// The active-device allowlists, pre-expanded for the three IP gates. Owner-tier
+// IPs are unioned into OfficeIps and into every branch's set, so a single
+// highest-tier row per device reproduces the old overlapping literals.
+public sealed class DeviceSnapshot
+{
+    public HashSet<string> OwnerIps { get; init; } = new();
+    public HashSet<string> OfficeIps { get; init; } = new();
+    public Dictionary<string, HashSet<string>> BranchIps { get; init; } =
+        new(StringComparer.OrdinalIgnoreCase);
+}
+
+// In-process cache of app_devices. The IP gates run on EVERY request, so they
+// must not hit Postgres each time. Reloaded lazily when older than the TTL (a
+// safety net for out-of-band psql edits) and invalidated immediately by the
+// /api/devices writes. The API is single-instance (same note as loginAttempts),
+// so an in-process cache with write-invalidation is fully coherent. A DB error
+// during Load() degrades to an empty snapshot rather than throwing out of a
+// gate: the emergency owner IPs still admit the owner to repair the registry.
+public sealed class DeviceRegistry
+{
+    private const int TtlSeconds = 30;
+    private readonly string _connectionString;
+    private readonly object _lock = new();
+    private volatile DeviceSnapshot? _snapshot;
+    private DateTime _loadedUtc = DateTime.MinValue;
+
+    public DeviceRegistry(string connectionString) => _connectionString = connectionString;
+
+    public DeviceSnapshot Current()
+    {
+        var snap = _snapshot;
+        if (snap != null && (DateTime.UtcNow - _loadedUtc).TotalSeconds < TtlSeconds) return snap;
+        lock (_lock)
+        {
+            if (_snapshot != null && (DateTime.UtcNow - _loadedUtc).TotalSeconds < TtlSeconds)
+                return _snapshot;
+            var loaded = Load();
+            _snapshot = loaded;
+            _loadedUtc = DateTime.UtcNow;
+            return loaded;
+        }
+    }
+
+    public void Invalidate()
+    {
+        lock (_lock) { _snapshot = null; _loadedUtc = DateTime.MinValue; }
+    }
+
+    private DeviceSnapshot Load()
+    {
+        try
+        {
+            using var db = new Npgsql.NpgsqlConnection(_connectionString);
+            var rows = db.Query<DeviceRow>(
+                "SELECT tailscale_ip AS TailscaleIp, tier AS Tier, branch_name AS BranchName " +
+                "FROM app_devices WHERE is_active = true").ToList();
+
+            var owner = rows.Where(r => r.Tier == "Owner").Select(r => r.TailscaleIp).ToHashSet();
+            var office = rows.Where(r => r.Tier is "Owner" or "Office").Select(r => r.TailscaleIp).ToHashSet();
+            var branch = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+            foreach (var r in rows.Where(r => r.Tier == "Branch" && r.BranchName != null))
+            {
+                if (!branch.TryGetValue(r.BranchName!, out var set))
+                {
+                    set = new HashSet<string>(owner);   // owner-tier devices satisfy every branch
+                    branch[r.BranchName!] = set;
+                }
+                set.Add(r.TailscaleIp);
+            }
+            return new DeviceSnapshot { OwnerIps = owner, OfficeIps = office, BranchIps = branch };
+        }
+        catch
+        {
+            // DB unreachable: empty snapshot. Owner still gets in via emergencyOwnerIps.
+            return new DeviceSnapshot();
+        }
+    }
+
+    private sealed class DeviceRow
+    {
+        public string TailscaleIp { get; set; } = string.Empty;
+        public string Tier { get; set; } = string.Empty;
+        public string? BranchName { get; set; }
+    }
 }
 
 public class ClassifyInventoryDto

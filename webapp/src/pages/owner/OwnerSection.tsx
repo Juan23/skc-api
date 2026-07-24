@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from 'react-router-dom'
 import { SectionNav } from '../../components/SectionNav'
 import { Users } from './Users'
+import { Devices } from './Devices'
 import { Recipes } from './Recipes'
 import { Classify } from './Classify'
 
@@ -9,6 +10,7 @@ import { Classify } from './Classify'
 // actually enforce it, and they'll 403 these screens from the office PC.
 const ITEMS = [
   { to: '/owner', label: 'Users' },
+  { to: '/owner/devices', label: 'Devices' },
   { to: '/owner/recipes', label: 'Recipes' },
   { to: '/owner/products', label: 'Products & pricing' },
 ]
@@ -19,6 +21,7 @@ export function OwnerSection() {
       <SectionNav items={ITEMS} />
       <Routes>
         <Route index element={<Users />} />
+        <Route path="devices" element={<Devices />} />
         <Route path="recipes" element={<Recipes />} />
         <Route path="products" element={<Classify />} />
         <Route path="*" element={<Navigate to="/owner" replace />} />

@@ -38,6 +38,20 @@ export interface AppUser {
   createdAt: string
 }
 
+// A trusted Tailscale device and its tier (Owner/Office/Branch), managed by the
+// owner from /owner/devices. `tier` reuses the Role union - the three strings are
+// the same. Replaces the hardcoded IP allowlists that used to live in Program.cs.
+export interface AppDevice {
+  deviceId: number
+  tailscaleIp: string
+  tier: Role
+  branchName: string | null
+  label: string | null
+  isActive: boolean
+  // Text, never a JS Date - same reason as AppUser.createdAt above.
+  createdAt: string
+}
+
 // --- inventory (DYNAMIC Dapper overload - lowercase keys, see header note) ---
 
 export interface InventoryRow {
