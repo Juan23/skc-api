@@ -739,6 +739,154 @@ app.MapDelete("/api/devices/{id:int}", async (int id, HttpContext http) =>
     return Results.Ok(new { Status = "Deleted" });
 });
 
+// ---------------------------------------------------------------------------
+// POS cashier registry - backs the web POS cashier picker. Admin endpoints are
+// RequireOwnerAdmin like devices/users; the per-branch feed is an ungated GET
+// (like every other GET) and deliberately includes each cashier's PIN salt+hash
+// so tills can cache them in IndexedDB and verify PINs offline. That makes the
+// PIN accountability-grade, not security-grade: 4 digits against a cached hash
+// is brute-forceable by design - its job is honest sale attribution, not access
+// control. Also deliberately absent, with reasons:
+//  - No orphan guard: zero cashiers for a branch is not a lockout - its tills
+//    fall back to the free-text staff-name input (that IS the rollback path).
+//  - No advisory lock/transaction: single-statement writes, and pos_staff isn't
+//    part of the shared MAX(local_id) ID-assignment pattern.
+//  - No lockout counter on wrong PINs: verification happens client-side on an
+//    offline device; any lockout would just brick a till mid-shift.
+// ---------------------------------------------------------------------------
+string? ValidateStaffDto(string? branchName, string? staffName)
+{
+    if (string.IsNullOrWhiteSpace(branchName) || branchName.Trim().Length > 100)
+        return "A branch name is required (max 100 characters).";
+    if (string.IsNullOrWhiteSpace(staffName) || staffName.Trim().Length < 2 || staffName.Trim().Length > 100)
+        return "Staff name must be 2-100 characters.";
+    return null;
+}
+
+string? ValidatePin(string? pin) =>
+    pin != null && pin.Length == 4 && pin.All(char.IsAsciiDigit) ? null : "PIN must be exactly 4 digits.";
+
+// Scheme (canonical here and in the till's Web Crypto check): salt = 16 random
+// bytes as lowercase hex; hash = lowercase hex SHA-256(UTF8(salt + pin)).
+(string Salt, string Hash) HashPin(string pin)
+{
+    var salt = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
+    return (salt, Sha256Hex(salt + pin));
+}
+
+// The till feed: active cashiers for one branch, WITH pin material (see the
+// block comment above). Typed QueryAsync so the aliased columns map camelCase.
+app.MapGet("/api/staff/branch/{branch}", async (string branch) =>
+{
+    using var db = new NpgsqlConnection(connectionString);
+    return Results.Ok(await db.QueryAsync<PosStaffPublicRow>(@"
+        SELECT staff_id AS StaffId, staff_name AS StaffName, pin_salt AS PinSalt, pin_hash AS PinHash
+        FROM pos_staff WHERE branch_name = @branch AND is_active
+        ORDER BY LOWER(staff_name)", new { branch }));
+});
+
+app.MapGet("/api/staff", async (HttpContext http) =>
+{
+    var denied = RequireOwnerAdmin(http); if (denied != null) return denied;
+    using var db = new NpgsqlConnection(connectionString);
+    return Results.Ok(await db.QueryAsync<PosStaffRow>(@"
+        SELECT staff_id AS StaffId, branch_name AS BranchName, staff_name AS StaffName,
+               is_active AS IsActive, created_at AS CreatedAt
+        FROM pos_staff ORDER BY branch_name, LOWER(staff_name)"));
+});
+
+app.MapPost("/api/staff", async (CreateStaffDto dto, HttpContext http) =>
+{
+    var denied = RequireOwnerAdmin(http); if (denied != null) return denied;
+    var invalid = ValidateStaffDto(dto.BranchName, dto.StaffName) ?? ValidatePin(dto.Pin);
+    if (invalid != null) return Results.BadRequest(invalid);
+
+    var (salt, hash) = HashPin(dto.Pin!);
+    using var db = new NpgsqlConnection(connectionString);
+    try
+    {
+        int id = await db.ExecuteScalarAsync<int>(@"
+            INSERT INTO pos_staff (branch_name, staff_name, pin_salt, pin_hash)
+            VALUES (@BranchName, @StaffName, @Salt, @Hash)
+            RETURNING staff_id",
+            new { BranchName = dto.BranchName!.Trim(), StaffName = dto.StaffName!.Trim(), Salt = salt, Hash = hash });
+        return Results.Ok(new { StaffId = id });
+    }
+    catch (PostgresException ex) when (ex.SqlState == "23505")
+    {
+        return Results.Problem($"A staff member named '{dto.StaffName!.Trim()}' already exists for {dto.BranchName!.Trim()}.", statusCode: 409);
+    }
+});
+
+// Rename / move branch only - the PIN is untouched (reset it via /pin below).
+app.MapPut("/api/staff/{id:int}", async (int id, UpdateStaffDto dto, HttpContext http) =>
+{
+    var denied = RequireOwnerAdmin(http); if (denied != null) return denied;
+    var invalid = ValidateStaffDto(dto.BranchName, dto.StaffName);
+    if (invalid != null) return Results.BadRequest(invalid);
+
+    using var db = new NpgsqlConnection(connectionString);
+    try
+    {
+        int rows = await db.ExecuteAsync(@"
+            UPDATE pos_staff SET branch_name = @BranchName, staff_name = @StaffName WHERE staff_id = @id",
+            new { BranchName = dto.BranchName!.Trim(), StaffName = dto.StaffName!.Trim(), id });
+        if (rows == 0) return Results.NotFound($"No staff member {id}.");
+        return Results.Ok(new { Status = "Updated" });
+    }
+    catch (PostgresException ex) when (ex.SqlState == "23505")
+    {
+        return Results.Problem($"A staff member named '{dto.StaffName!.Trim()}' already exists for {dto.BranchName!.Trim()}.", statusCode: 409);
+    }
+});
+
+// The plaintext PIN crosses the wire (HTTPS only), is hashed immediately with a
+// fresh salt, and is never stored or logged.
+app.MapPost("/api/staff/{id:int}/pin", async (int id, SetStaffPinDto dto, HttpContext http) =>
+{
+    var denied = RequireOwnerAdmin(http); if (denied != null) return denied;
+    var invalid = ValidatePin(dto.Pin);
+    if (invalid != null) return Results.BadRequest(invalid);
+
+    var (salt, hash) = HashPin(dto.Pin!);
+    using var db = new NpgsqlConnection(connectionString);
+    int rows = await db.ExecuteAsync(
+        "UPDATE pos_staff SET pin_salt = @Salt, pin_hash = @Hash WHERE staff_id = @id",
+        new { Salt = salt, Hash = hash, id });
+    if (rows == 0) return Results.NotFound($"No staff member {id}.");
+    return Results.Ok(new { Status = "PinSet" });
+});
+
+app.MapPatch("/api/staff/{id:int}/deactivate", async (int id, HttpContext http) =>
+{
+    var denied = RequireOwnerAdmin(http); if (denied != null) return denied;
+    using var db = new NpgsqlConnection(connectionString);
+    int rows = await db.ExecuteAsync("UPDATE pos_staff SET is_active = FALSE WHERE staff_id = @id", new { id });
+    if (rows == 0) return Results.NotFound($"No staff member {id}.");
+    return Results.Ok(new { Status = "Deactivated" });
+});
+
+app.MapPatch("/api/staff/{id:int}/activate", async (int id, HttpContext http) =>
+{
+    var denied = RequireOwnerAdmin(http); if (denied != null) return denied;
+    using var db = new NpgsqlConnection(connectionString);
+    int rows = await db.ExecuteAsync("UPDATE pos_staff SET is_active = TRUE WHERE staff_id = @id", new { id });
+    if (rows == 0) return Results.NotFound($"No staff member {id}.");
+    return Results.Ok(new { Status = "Activated" });
+});
+
+// Hard delete. Historical pos_sales.staff_name strings are snapshots - deleting
+// a cashier never touches sales, and their already-queued offline sales still
+// sync (the sales endpoint only requires a non-blank StaffName).
+app.MapDelete("/api/staff/{id:int}", async (int id, HttpContext http) =>
+{
+    var denied = RequireOwnerAdmin(http); if (denied != null) return denied;
+    using var db = new NpgsqlConnection(connectionString);
+    int rows = await db.ExecuteAsync("DELETE FROM pos_staff WHERE staff_id = @id", new { id });
+    if (rows == 0) return Results.NotFound($"No staff member {id}.");
+    return Results.Ok(new { Status = "Deleted" });
+});
+
 app.MapPost("/api/purchases", async (List<PurchaseLogDto> purchases, HttpContext http) =>
 {
     if (!IsTrustedOfficeCaller(http)) return Results.Problem("This endpoint is restricted to trusted office devices.", statusCode: 403);
@@ -2116,6 +2264,43 @@ public class UpdateDeviceDto
     public string Tier { get; set; } = string.Empty;
     public string? BranchName { get; set; }
     public string? Label { get; set; }
+}
+
+// Owner admin list - no PIN material.
+public class PosStaffRow
+{
+    public int StaffId { get; set; }
+    public string BranchName { get; set; } = string.Empty;
+    public string StaffName { get; set; } = string.Empty;
+    public bool IsActive { get; set; }
+    public DateTime CreatedAt { get; set; }
+}
+
+// The tills' branch feed - includes the salt+hash for offline PIN verification.
+public class PosStaffPublicRow
+{
+    public int StaffId { get; set; }
+    public string StaffName { get; set; } = string.Empty;
+    public string PinSalt { get; set; } = string.Empty;
+    public string PinHash { get; set; } = string.Empty;
+}
+
+public class CreateStaffDto
+{
+    public string? BranchName { get; set; }
+    public string? StaffName { get; set; }
+    public string? Pin { get; set; }
+}
+
+public class UpdateStaffDto
+{
+    public string? BranchName { get; set; }
+    public string? StaffName { get; set; }
+}
+
+public class SetStaffPinDto
+{
+    public string? Pin { get; set; }
 }
 
 // The active-device allowlists, pre-expanded for the three IP gates. Owner-tier
