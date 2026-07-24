@@ -1,12 +1,14 @@
 import { expect, test } from '@playwright/test'
+import { ensureTestCashier, pickCashier } from './staff-helpers'
 
 // STRESS / durability probe for the offline-first web POS - beyond the single
 // sale in pos-smoke.spec.ts. Rings a burst of sales while offline (cash,
 // cashless, and a discounted sale), reloads mid-queue, then reconnects and
 // asserts the WHOLE burst drains with no loss and no duplication - checked in
 // IndexedDB (pendingSales -> 0, syncedLog -> N) AND against the server's
-// authoritative day-log. Real rows, staff name "test-stress" per the codebase's
-// test-tag cleanup convention (skc-api/CLAUDE.md "Test data accumulates").
+// authoritative day-log. Real rows, staff name "test-cashier" (the seeded
+// picker row) per the codebase's test-tag cleanup convention (skc-api/CLAUDE.md
+// "Test data accumulates").
 //
 // This is a review-time probe, not permanent regression coverage; delete after
 // the review round if it isn't wanted as a keeper.
@@ -15,6 +17,12 @@ const USERNAME = process.env.PLAYWRIGHT_BRANCH_USERNAME
 const PASSWORD = process.env.PLAYWRIGHT_BRANCH_PASSWORD
 
 test.skip(!USERNAME || !PASSWORD, 'Set PLAYWRIGHT_BRANCH_USERNAME/PASSWORD in .env.playwright')
+test.skip(
+  !process.env.PLAYWRIGHT_OWNER_USERNAME || !process.env.PLAYWRIGHT_OWNER_PASSWORD || !process.env.PLAYWRIGHT_STAFF_PIN,
+  'Set PLAYWRIGHT_OWNER_USERNAME/PASSWORD and PLAYWRIGHT_STAFF_PIN in .env.playwright (needed to seed the test cashier)',
+)
+
+test.beforeAll(() => ensureTestCashier())
 
 test.beforeEach(({ page }) => {
   page.on('dialog', (dialog) => dialog.accept())
@@ -68,8 +76,10 @@ async function signInTill(page: Page) {
 // Rings one sale: tap the Nth catalog tile, optionally add a discount, complete
 // via cash or a cashless method. Waits for the "sale complete" confirmation so
 // the durable commit has landed before the next ring.
+// The cashier is picked ONCE before the burst (see the test body) and persists
+// across consecutive sales - useCart.reset() deliberately keeps staffName, and
+// each subsequent Complete being enabled implicitly asserts that persistence.
 async function ringSale(page: Page, opts: { tile: number; method: string; discount?: string }) {
-  await page.getByLabel('Staff name').fill('test-stress')
   const tiles = page.locator('.pos-tile')
   await tiles.nth(opts.tile).click()
   if (opts.discount) {
@@ -92,6 +102,11 @@ test('a burst of offline sales survives reloads and fully drains on reconnect', 
   // Baseline: however many the till already had synced today (other tests /
   // prior runs share the zz-gaisano till), so the assertions are deltas.
   const baseSynced = await countStore(page, 'syncedLog')
+
+  // Verify the cashier while still online (the picker only appears once the
+  // mount sync's staff pull lands - going offline first would race it), then
+  // ring the whole burst offline on that one verification.
+  await pickCashier(page)
 
   await context.setOffline(true)
 
@@ -129,8 +144,10 @@ test('a burst of offline sales survives reloads and fully drains on reconnect', 
   await page.screenshot({ path: testInfo.outputPath('03-fully-drained.png'), fullPage: true })
 
   // Server-side confirmation: the day log's reconcile pulls the authoritative
-  // rows. Switch to it and confirm our test-stress sales are actually there.
+  // rows. Switch to it and confirm our test-cashier sales are actually there.
+  // (Scoped to the day-log entry markup - a bare getByText would also match
+  // the hidden Sell view's picker button for the same name.)
   await page.getByRole('tab', { name: /today's sales/i }).click()
-  await expect(page.getByText('test-stress').first()).toBeVisible({ timeout: 10_000 })
+  await expect(page.locator('.pos-daylog-who', { hasText: 'test-cashier' }).first()).toBeVisible({ timeout: 10_000 })
   await page.screenshot({ path: testInfo.outputPath('04-server-daylog.png'), fullPage: true })
 })

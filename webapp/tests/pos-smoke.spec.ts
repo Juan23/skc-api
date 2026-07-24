@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { TEST_CASHIER, ensureTestCashier, pickCashier, staffPin } from './staff-helpers'
 
 // Playwright stand-in for the manual Claude-in-Chrome pass documented in
 // skc-api/CLAUDE.md ("Claude-in-Chrome POS testing") and narrated in
@@ -9,14 +10,23 @@ import { expect, test } from '@playwright/test'
 // live Claude-in-Chrome here.
 //
 // Real production rows: every sale rung by this test carries staff name
-// "test-playwright" (matches the codebase's standing `test`-tag convention -
-// see skc-api/CLAUDE.md "Test data accumulates in production") so it's safe
-// to leave in place for the owner's eventual one-shot cleanup sweep.
+// "test-cashier" (rung through the cashier picker's seeded test row - matches
+// the codebase's standing `test`-tag convention, see skc-api/CLAUDE.md "Test
+// data accumulates in production") so it's safe to leave in place for the
+// owner's eventual one-shot cleanup sweep.
 
 const USERNAME = process.env.PLAYWRIGHT_BRANCH_USERNAME
 const PASSWORD = process.env.PLAYWRIGHT_BRANCH_PASSWORD
 
 test.skip(!USERNAME || !PASSWORD, 'Set PLAYWRIGHT_BRANCH_USERNAME/PASSWORD in .env.playwright - see .env.playwright.example')
+test.skip(
+  !process.env.PLAYWRIGHT_OWNER_USERNAME || !process.env.PLAYWRIGHT_OWNER_PASSWORD || !process.env.PLAYWRIGHT_STAFF_PIN,
+  'Set PLAYWRIGHT_OWNER_USERNAME/PASSWORD and PLAYWRIGHT_STAFF_PIN in .env.playwright (needed to seed the test cashier)',
+)
+
+// The cashier picker needs an active test-cashier row for Gaisano server-side;
+// idempotent, so parallel workers and repeat runs converge on the same state.
+test.beforeAll(() => ensureTestCashier())
 
 test.beforeEach(({ page }) => {
   // SaleScreen.submit() gates every completed sale behind window.confirm -
@@ -67,9 +77,20 @@ test('till provisions and rings an online sale', async ({ page }, testInfo) => {
   await signInTill(page)
   await page.screenshot({ path: testInfo.outputPath('01-till-ready.png'), fullPage: true })
 
-  await page.getByLabel('Staff name').fill('test-playwright')
-  // First catalog tile - real SKU, but tagging is via staff name (the field
-  // the codebase's own cleanup-sweep convention greps on), not item choice.
+  // The cashier picker replaced the free-text input (Gaisano has staff rows).
+  // First prove a wrong PIN is rejected inline, then verify with the real one.
+  const cashierBtn = page.getByRole('button', { name: TEST_CASHIER, exact: true })
+  await expect(cashierBtn).toBeVisible({ timeout: 15_000 })
+  await cashierBtn.click()
+  await page.getByLabel('PIN').fill('0000')
+  await expect(page.getByText(/wrong pin/i)).toBeVisible()
+  await page.screenshot({ path: testInfo.outputPath('01b-wrong-pin.png'), fullPage: true })
+  await page.getByLabel('PIN').fill(staffPin())
+  await expect(page.getByText(`Cashier: ${TEST_CASHIER}`)).toBeVisible()
+
+  // First catalog tile - real SKU, but tagging is via the cashier name (the
+  // field the codebase's own cleanup-sweep convention greps on), not item
+  // choice.
   await page.locator('.pos-tile').first().click()
   await page.screenshot({ path: testInfo.outputPath('02-item-added.png'), fullPage: true })
 
@@ -94,13 +115,25 @@ test('a sale rung offline survives a reload and syncs once reconnected', async (
   // instead of hitting a real net::ERR_INTERNET_DISCONNECTED.
   await page.evaluate(() => navigator.serviceWorker.ready)
 
+  // Wait for the cashier picker to appear BEFORE going offline - it only
+  // renders once the mount sync's staff pull has landed and been cached, and
+  // that pull needs the network. Going offline first would race the pull and
+  // strand the till on the free-text fallback.
+  await expect(page.getByRole('button', { name: TEST_CASHIER, exact: true })).toBeVisible({ timeout: 15_000 })
+
   await context.setOffline(true)
 
   // Ringing the sale is itself the thing that makes the app discover it's
   // offline: commitSale() is purely local (durable regardless of network),
   // but Pos.tsx's onComplete calls sync.triggerSync() right after - that
   // attempt is what actually hits the blocked network and flips the badge.
-  await page.getByLabel('Staff name').fill('test-playwright')
+  //
+  // Picking the cashier AFTER the offline flip is deliberate - it's the
+  // feature's headline offline assertion: the staff list was cached during
+  // the online signInTill sync, and the PIN check is pure client-side
+  // SubtleCrypto, so the whole verified-cashier flow must work with the
+  // network gone.
+  await pickCashier(page)
   await page.locator('.pos-tile').first().click()
   await page.getByRole('button', { name: 'Complete sale' }).click()
   await expect(page.getByText(/sale complete/i)).toBeVisible({ timeout: 10_000 })

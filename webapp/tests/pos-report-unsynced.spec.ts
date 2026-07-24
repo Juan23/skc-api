@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { ensureTestCashier, pickCashier } from './staff-helpers'
 
 // Regression for bug-track L1 (2026-07-23): an ONLINE POS DayReport must include
 // today's not-yet-synced local sales, so its gross matches the day log's takings
@@ -12,12 +13,19 @@ import { expect, test } from '@playwright/test'
 // summary line - which, before the fix, only ever appeared on the OFFLINE path.
 //
 // Real login only; the blocked sale never reaches the server, so no test row is
-// created. Staff name "test-l1" per the test-tag convention regardless.
+// created. Staff name "test-cashier" (the seeded picker row) per the test-tag
+// convention regardless.
 
 const USERNAME = process.env.PLAYWRIGHT_BRANCH_USERNAME
 const PASSWORD = process.env.PLAYWRIGHT_BRANCH_PASSWORD
 
 test.skip(!USERNAME || !PASSWORD, 'Set PLAYWRIGHT_BRANCH_USERNAME/PASSWORD in .env.playwright')
+test.skip(
+  !process.env.PLAYWRIGHT_OWNER_USERNAME || !process.env.PLAYWRIGHT_OWNER_PASSWORD || !process.env.PLAYWRIGHT_STAFF_PIN,
+  'Set PLAYWRIGHT_OWNER_USERNAME/PASSWORD and PLAYWRIGHT_STAFF_PIN in .env.playwright (needed to seed the test cashier)',
+)
+
+test.beforeAll(() => ensureTestCashier())
 
 test.beforeEach(({ page }) => {
   page.on('dialog', (dialog) => dialog.accept())
@@ -60,7 +68,9 @@ test('an online report includes a not-yet-synced sale (L1)', async ({ page }, te
 
   // Ring a sale. commitSale makes it durable+pending; the post-sale sync push is
   // 500-blocked, so it stays 'pending' (not moved to synced, not a server row).
-  await page.getByLabel('Staff name').fill('test-l1')
+  // (The staff pull is a GET, untouched by the POST-only route above, so the
+  // cashier picker works normally here.)
+  await pickCashier(page)
   await page.locator('.pos-tile').first().click()
   await page.getByRole('button', { name: 'Complete sale' }).click()
   await expect(page.getByText(/sale complete/i)).toBeVisible({ timeout: 10_000 })
