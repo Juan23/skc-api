@@ -15,6 +15,10 @@ export default defineConfig({
   testDir: './tests',
   timeout: 30_000,
   retries: 0,
+  // One-time seeding (the cashier-picker specs' test-cashier row). Global, not
+  // per-spec beforeAll: each seeding pass costs a zz-owner login and the API
+  // rate-limits logins to 10 per IP per 5 minutes - see tests/global-setup.ts.
+  globalSetup: './tests/global-setup.ts',
   reporter: [['list'], ['html', { outputFolder: 'playwright-report', open: 'never' }]],
   use: {
     baseURL: process.env.PLAYWRIGHT_BASE_URL || 'https://skc-hq.tail0988bb.ts.net',

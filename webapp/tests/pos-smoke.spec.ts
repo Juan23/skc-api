@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { TEST_CASHIER, ensureTestCashier, pickCashier, staffPin } from './staff-helpers'
+import { TEST_CASHIER, pickCashier, staffPin } from './staff-helpers'
 
 // Playwright stand-in for the manual Claude-in-Chrome pass documented in
 // skc-api/CLAUDE.md ("Claude-in-Chrome POS testing") and narrated in
@@ -24,9 +24,9 @@ test.skip(
   'Set PLAYWRIGHT_OWNER_USERNAME/PASSWORD and PLAYWRIGHT_STAFF_PIN in .env.playwright (needed to seed the test cashier)',
 )
 
-// The cashier picker needs an active test-cashier row for Gaisano server-side;
-// idempotent, so parallel workers and repeat runs converge on the same state.
-test.beforeAll(() => ensureTestCashier())
+// The active Gaisano test-cashier row the picker needs is seeded ONCE per run
+// in tests/global-setup.ts (not per-spec - each seeding costs a rate-limited
+// owner login).
 
 test.beforeEach(({ page }) => {
   // SaleScreen.submit() gates every completed sale behind window.confirm -

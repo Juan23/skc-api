@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { ensureTestCashier, pickCashier } from './staff-helpers'
+import { pickCashier } from './staff-helpers'
 
 // Regression for bug-track L1 (2026-07-23): an ONLINE POS DayReport must include
 // today's not-yet-synced local sales, so its gross matches the day log's takings
@@ -24,8 +24,6 @@ test.skip(
   !process.env.PLAYWRIGHT_OWNER_USERNAME || !process.env.PLAYWRIGHT_OWNER_PASSWORD || !process.env.PLAYWRIGHT_STAFF_PIN,
   'Set PLAYWRIGHT_OWNER_USERNAME/PASSWORD and PLAYWRIGHT_STAFF_PIN in .env.playwright (needed to seed the test cashier)',
 )
-
-test.beforeAll(() => ensureTestCashier())
 
 test.beforeEach(({ page }) => {
   page.on('dialog', (dialog) => dialog.accept())

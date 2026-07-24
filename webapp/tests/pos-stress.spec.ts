@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { ensureTestCashier, pickCashier } from './staff-helpers'
+import { pickCashier } from './staff-helpers'
 
 // STRESS / durability probe for the offline-first web POS - beyond the single
 // sale in pos-smoke.spec.ts. Rings a burst of sales while offline (cash,
@@ -21,8 +21,6 @@ test.skip(
   !process.env.PLAYWRIGHT_OWNER_USERNAME || !process.env.PLAYWRIGHT_OWNER_PASSWORD || !process.env.PLAYWRIGHT_STAFF_PIN,
   'Set PLAYWRIGHT_OWNER_USERNAME/PASSWORD and PLAYWRIGHT_STAFF_PIN in .env.playwright (needed to seed the test cashier)',
 )
-
-test.beforeAll(() => ensureTestCashier())
 
 test.beforeEach(({ page }) => {
   page.on('dialog', (dialog) => dialog.accept())
