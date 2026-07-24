@@ -11,6 +11,7 @@ import type { PosSaleDto, PosSaleLineDto, PosSaleSyncResult } from '../api/types
 import { getDb } from './db'
 import type { PendingSale } from './db'
 import { pullCatalog } from './catalogSync'
+import { pullStaff } from './staffSync'
 import { centavosToWireNumber } from './money'
 import { localTimestamp } from '../lib/format'
 
@@ -162,6 +163,7 @@ async function pushPendingSales(): Promise<{ ok: boolean; offline: boolean }> {
 export interface UsePosSyncOptions {
   branchName: string | null
   onCatalogChanged?: () => void
+  onStaffChanged?: () => void
 }
 
 export interface PosSyncState {
@@ -171,7 +173,7 @@ export interface PosSyncState {
   triggerSync: () => void
 }
 
-export function usePosSync({ branchName, onCatalogChanged }: UsePosSyncOptions): PosSyncState {
+export function usePosSync({ branchName, onCatalogChanged, onStaffChanged }: UsePosSyncOptions): PosSyncState {
   const [status, setStatus] = useState<PosSyncStatus>('idle')
   const [pendingCount, setPendingCount] = useState(0)
   const [lastError, setLastError] = useState<string | null>(null)
@@ -219,6 +221,14 @@ export function usePosSync({ branchName, onCatalogChanged }: UsePosSyncOptions):
             // healthy 200 that just has nothing sellable yet (reason 'empty')
             // is NOT a failure - the server was reached, so leave this false.
             else if (pull.reason === 'error') pullFailed = true
+
+            // Staff list rides the same cycle (mount, 60s tick, 'online',
+            // post-sale) but is deliberately kept OUT of the status-badge
+            // computation above/below - the badge taxonomy stays driven by the
+            // sales push + catalog pull only; a failed staff refresh just keeps
+            // the last-good cached list.
+            const staffPull = await pullStaff(branch)
+            if (staffPull.ok) onStaffChanged?.()
           }
 
           if (!pushResult.ok) {
@@ -269,7 +279,7 @@ export function usePosSync({ branchName, onCatalogChanged }: UsePosSyncOptions):
     } finally {
       runningRef.current = false
     }
-  }, [onCatalogChanged, refreshPendingCount])
+  }, [onCatalogChanged, onStaffChanged, refreshPendingCount])
 
   // branchName is in the deps deliberately: on first mount the POS identity is
   // still being read from IndexedDB, so branchName is null and that first

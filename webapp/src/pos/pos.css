@@ -160,6 +160,82 @@
   width: 100%;
 }
 
+/* --- cashier picker (verified staff mode; .pos-staff-input is the fallback) -- */
+
+.pos-cashier-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.pos-cashier-name {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.pos-cashier-switch {
+  padding: 6px 12px;
+  background: var(--surface);
+  border: 1px solid var(--silver);
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.pos-cashier-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.pos-cashier-pick {
+  min-height: 44px;
+  padding: 8px 16px;
+  background: var(--surface);
+  border: 1px solid var(--silver);
+  border-radius: 10px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.pos-cashier-pin {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pos-pin-input {
+  width: 100%;
+  height: 40px;
+  font-size: 20px;
+  text-align: center;
+  letter-spacing: 8px;
+}
+
+.pos-pin-error {
+  margin: 0;
+  font-size: 13px;
+  color: var(--firebrick);
+}
+
+.pos-pinpad {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+
+.pos-pinpad-key {
+  min-height: 48px;
+  background: var(--surface);
+  border: 1px solid var(--silver);
+  border-radius: 10px;
+  cursor: pointer;
+  font-size: 18px;
+  font-weight: 600;
+}
+
 .pos-cart-lines {
   flex: 1;
   min-height: 80px;

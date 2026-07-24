@@ -4,11 +4,12 @@
 // decision #2 ("POS is a POS, nothing else").
 import { useCallback, useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
-import type { InventoryRow } from '../api/types'
+import type { InventoryRow, PosStaffPublic } from '../api/types'
 import { commitSale } from './commitSale'
 import type { CompletedSale } from './SaleScreen'
 import { SaleScreen } from './SaleScreen'
 import { getCachedCatalog } from './catalogSync'
+import { getCachedStaff } from './staffSync'
 import { PosAuthProvider, usePosAuth } from './posAuth'
 import { PosStatusBadge } from './PosStatusBadge'
 import { usePosSync } from './syncEngine'
@@ -126,6 +127,7 @@ function SignInOverlay() {
 function PosInner() {
   const auth = usePosAuth()
   const [catalog, setCatalog] = useState<InventoryRow[]>([])
+  const [staff, setStaff] = useState<PosStaffPublic[]>([])
   const [view, setView] = useState<PosView>('sell')
 
   const refreshCatalog = useCallback(() => {
@@ -137,7 +139,21 @@ function PosInner() {
   }, [refreshCatalog])
 
   const branchName = auth.identity?.branchName ?? null
-  const sync = usePosSync({ branchName, onCatalogChanged: refreshCatalog })
+
+  // Cached-staff mirror of refreshCatalog, keyed on branchName because the
+  // cache read is branch-guarded (a till re-provisioned to another branch must
+  // not show the old branch's cashiers). Re-runs when the identity resolves
+  // null -> branch on mount, same reason as the syncEngine's branchName dep.
+  const refreshStaff = useCallback(() => {
+    if (branchName) void getCachedStaff(branchName).then(setStaff)
+    else setStaff([])
+  }, [branchName])
+
+  useEffect(() => {
+    refreshStaff()
+  }, [refreshStaff])
+
+  const sync = usePosSync({ branchName, onCatalogChanged: refreshCatalog, onStaffChanged: refreshStaff })
 
   const handleComplete = useCallback(
     async (sale: CompletedSale) => {
@@ -161,7 +177,7 @@ function PosInner() {
           part-built cart isn't lost by switching to the day log and back. The
           day log remounts each time it's shown (keyed by view) to re-pull. */}
       <div style={{ display: view === 'sell' ? 'contents' : 'none' }}>
-        <SaleScreen catalog={catalog} onComplete={handleComplete} />
+        <SaleScreen catalog={catalog} staff={staff} onComplete={handleComplete} />
       </div>
       {view === 'daylog' && branchName && (
         <DayLog branch={branchName} voidedBy={auth.identity?.username ?? ''} onChanged={sync.triggerSync} />

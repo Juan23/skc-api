@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { InventoryRow } from '../api/types'
+import type { InventoryRow, PosStaffPublic } from '../api/types'
 import { centavosToDecimalString, formatCentavos, toCentavos } from './money'
 import { useCart } from './useCart'
 import type { CartLine } from './useCart'
+import { CashierPicker } from './CashierPicker'
+import { pinVerificationAvailable } from './staffSync'
 import './pos.css'
 
 // The web POS's cart screen (webapp-pos-plan.md Increment 3, redesigned as a
@@ -31,6 +33,11 @@ const CASHLESS_METHODS = ['GCash', 'GCash Terminal', 'Foodpanda'] as const
 
 interface Props {
   catalog: InventoryRow[]
+  // The branch's cached cashier list. Non-empty -> the staff-name input becomes
+  // the verified cashier picker; empty -> the original free-text input, so a
+  // fresh/never-synced till, a branch the owner hasn't onboarded, or a broken
+  // cache all behave exactly like today (rollout can never brick a till).
+  staff?: PosStaffPublic[]
   onComplete?: (sale: CompletedSale) => Promise<void>
 }
 
@@ -157,7 +164,7 @@ function quickCashOptions(totalCentavos: number): number[] {
   return Array.from(options).sort((a, b) => a - b)
 }
 
-export function SaleScreen({ catalog, onComplete }: Props) {
+export function SaleScreen({ catalog, staff = [], onComplete }: Props) {
   const cart = useCart()
   const [search, setSearch] = useState('')
   const [discountOpen, setDiscountOpen] = useState(false)
@@ -306,6 +313,26 @@ export function SaleScreen({ catalog, onComplete }: Props) {
   // next tap-to-add.
   const [lastSale, setLastSale] = useState<{ total: number; change: number | null; method: string } | null>(null)
 
+  // Verified-cashier mode whenever the branch has cashiers cached AND the
+  // browser can actually verify a PIN; otherwise the original free-text input.
+  const usePicker = staff.length > 0 && pinVerificationAvailable()
+
+  // Reconcile the selected cashier against staff-list updates. Two cases:
+  //  - the selected cashier was deactivated/renamed/deleted mid-shift (a sync
+  //    landed): clear the selection so the NEXT sale needs a valid re-pick -
+  //    the in-progress cart lines are untouched, only the Complete gate closes.
+  //  - the till just flipped from free-text to picker mode (first staff pull
+  //    landed) while an unverified typed name was sitting in the box: that
+  //    unverified text must not survive into picker mode.
+  // Sales already queued in pendingSales are never touched - their staffName is
+  // an immutable snapshot and the server only requires it non-blank, so a
+  // deactivated cashier's queued sales still sync fine.
+  const { staffName: selectedStaffName, setStaffName: setSelectedStaffName } = cart
+  useEffect(() => {
+    if (!usePicker || selectedStaffName === '') return
+    if (!staff.some((s) => s.staffName === selectedStaffName)) setSelectedStaffName('')
+  }, [usePicker, staff, selectedStaffName, setSelectedStaffName])
+
   const hasSellableLine = cart.lines.some((l) => l.sku != null)
   // Short payment = cash was entered AND it's less than the total. Block it so a
   // sale can't be completed for more than the cashier collected. Entering NO
@@ -400,13 +427,22 @@ export function SaleScreen({ catalog, onComplete }: Props) {
       <div className="pos-cart">
         <div className="pos-cart-header">
           <h1>Current sale</h1>
-          <input
-            className="pos-staff-input"
-            value={cart.staffName}
-            onChange={(e) => cart.setStaffName(e.target.value)}
-            placeholder="Staff name"
-            aria-label="Staff name"
-          />
+          {usePicker ? (
+            <CashierPicker
+              staff={staff}
+              current={cart.staffName}
+              onVerified={(name) => cart.setStaffName(name)}
+              onSwitch={() => cart.setStaffName('')}
+            />
+          ) : (
+            <input
+              className="pos-staff-input"
+              value={cart.staffName}
+              onChange={(e) => cart.setStaffName(e.target.value)}
+              placeholder="Staff name"
+              aria-label="Staff name"
+            />
+          )}
         </div>
 
         <div className="pos-cart-lines">
